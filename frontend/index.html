@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IP-SAKTI Sahayak | 5-Step Triage & Legal Chat Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-layout">
+    <!-- HEADER -->
+    <header class="top-header">
+      <div class="brand">
+        <div class="logo-icon">🌿</div>
+        <div>
+          <h1>IP-SAKTI Sahayak <span class="badge-mvp">5-Step Triage Agent</span></h1>
+          <p class="tagline">Statutory Formulation Classifier • Hybrid Qdrant RAG • Cross-Encoder Grounding</p>
+        </div>
+      </div>
+
+      <!-- JURISDICTION & EXPORT CONTROLS -->
+      <div class="header-controls">
+        <div class="jurisdiction-toggle" id="jurisdictionToggle">
+          <button class="toggle-btn active" data-jur="national">🇮🇳 India (National)</button>
+          <button class="toggle-btn" data-jur="international">🌐 International</button>
+          <button class="toggle-btn" data-jur="comparative">⚖️ Comparative</button>
+        </div>
+        <button id="exportDossierBtn" class="btn-dossier" title="Export Markdown dossier for patent attorneys">📋 Export Dossier</button>
+      </div>
+    </header>
+
+    <!-- WORKSPACE -->
+    <div class="workspace-container">
+      <!-- SIDEBAR: 5-STEP FORMULATION TRIAGE -->
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h3>🧪 5-Step Formulation Triage</h3>
+          <p>Statutory Posture, Patentability & ABS Matrix</p>
+        </div>
+
+        <form id="triageForm" class="wizard-form">
+          <!-- Step 1: Product Name -->
+          <div class="step-card">
+            <label class="step-label">1. Product Name</label>
+            <input type="text" id="triageProductName" class="text-input" value="Maha Triphala Ghrita" required />
+          </div>
+
+          <!-- Step 2: First Schedule Text -->
+          <div class="step-card">
+            <label class="step-label">2. Ancient Authoritative Book?</label>
+            <p class="step-desc">Is it formulated verbatim from 54 First Schedule texts (e.g. Charaka, AFI)?</p>
+            <div class="radio-group">
+              <label><input type="radio" name="triage_is_classical" value="yes" checked /> Yes (Classical)</label>
+              <label><input type="radio" name="triage_is_classical" value="no" /> No (Custom/Proprietary)</label>
+            </div>
+          </div>
+
+          <!-- Step 3: Extraction Method -->
+          <div class="step-card">
+            <label class="step-label">3. Extraction Method</label>
+            <select id="triageExtraction" class="text-input select-input">
+              <option value="traditional_aqueous_decoction">Traditional Water Decoction (Kashaya/Kwatha)</option>
+              <option value="traditional_powder">Traditional Powder / Churna</option>
+              <option value="standardized_hydroalcoholic_extract">Standardized Solvent Extract (Hydroalcoholic)</option>
+              <option value="isolated_purified_phytochemical_fraction">Purified Chemical Fraction (Phytopharmaceutical)</option>
+            </select>
+          </div>
+
+          <!-- Step 4: Delivery Format -->
+          <div class="step-card">
+            <label class="step-label">4. Delivery Format</label>
+            <select id="triageDelivery" class="text-input select-input">
+              <option value="traditional_ghrita_oil">Traditional Medicated Oil / Ghrita</option>
+              <option value="traditional_powder">Traditional Churna / Tablet (Vati)</option>
+              <option value="hard_gelatin_capsule">Modern Capsule / Tablet</option>
+              <option value="topical_emulgel">Topical Gel / Emulsion</option>
+              <option value="nano_liposomal_emulsion">Novel Nanoparticles / Liposomes</option>
+              <option value="food_beverage_powder">Ayurveda Aahar (Food / Beverage)</option>
+            </select>
+          </div>
+
+          <!-- Step 5: Synergy & Practitioner Exemption -->
+          <div class="step-card">
+            <label class="step-label">5. Synergy & Exemption</label>
+            <div class="checkbox-stack">
+              <label><input type="checkbox" id="triageSynergy" /> Have comparative trial synergy data (Proof for §3(e))</label>
+              <label><input type="checkbox" id="triagePractitioner" checked /> Registered AYUSH Practitioner / Vaidya (§40 Exemption)</label>
+            </div>
+          </div>
+
+          <button type="submit" class="btn-primary w-full">⚡ Evaluate 5-Step Posture</button>
+        </form>
+
+        <!-- VERDICT CARD -->
+        <div id="classificationCard" class="result-card hidden">
+          <div class="badge-row">
+            <span id="catBadge" class="badge">Classical Medicine</span>
+            <span id="patentBadge" class="badge-status">BARRED §3(p)</span>
+          </div>
+
+          <div class="posture-box">
+            <strong>⚖️ Patent Status:</strong>
+            <p id="patentPosture"></p>
+          </div>
+
+          <div class="posture-box">
+            <strong>🌱 Biodiversity ABS Status:</strong>
+            <p id="absPosture"></p>
+          </div>
+
+          <div class="posture-box">
+            <strong>🏛️ Licensing & Forms:</strong>
+            <p id="authorityPosture"></p>
+            <div id="formsList" class="forms-chips"></div>
+          </div>
+
+          <div class="posture-box">
+            <strong>✅ Compliance Checklist:</strong>
+            <ul id="checklistUl" class="checklist"></ul>
+          </div>
+        </div>
+      </aside>
+
+      <!-- CHAT AGENT WORKSPACE -->
+      <main class="chat-workspace">
+        <div class="chat-messages" id="chatMessages">
+          <div class="msg-bubble bot welcome-msg">
+            <div class="msg-header">
+              <span class="bot-name">🌿 IP-SAKTI Sahayak (5-Step Statutory Assistant)</span>
+              <span class="confidence-badge">🎯 Grounded Agent</span>
+            </div>
+            <div class="msg-text">
+              <p>Namaste! I am your <strong>Statutory AI Assistant</strong> for Ayurvedic Intellectual Property and Regulatory Compliance.</p>
+              <p style="margin-top: 8px;">You can ask any legal question, or use the <strong>5-Step Triage Wizard</strong> on the left to evaluate whether your formulation can be patented, how to license it, and whether you are exempt from biodiversity fees.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="chat-input-bar">
+          <div class="quick-chips">
+            <button class="chip" onclick="sendQuickPrompt('Can I patent a classical formulation from Charaka Samhita under Section 3(p)?')">Section 3(p) TK Bar</button>
+            <button class="chip" onclick="sendQuickPrompt('What are the labelling requirements for Ayurvedic medicines under Rule 161?')">Rule 161 Labelling</button>
+            <button class="chip" onclick="sendQuickPrompt('Mandatory disclosure of country of origin for genetic resources under WIPO GRATK Treaty 2024')">WIPO GRATK 2024</button>
+            <button class="chip" onclick="sendQuickPrompt('Section 40 Biodiversity Act exemptions for registered AYUSH practitioners')">BD Act Section 40 Exemption</button>
+          </div>
+
+          <form id="chatForm" class="input-form">
+            <input 
+              type="text" 
+              id="chatInput" 
+              placeholder="Ask an Ayurvedic IPR / regulatory question or discuss your formulation..." 
+              autocomplete="off"
+              required 
+            />
+            <button type="submit" class="btn-send">Send ➔</button>
+          </form>
+        </div>
+      </main>
+
+      <!-- CITATION INSPECTOR DRAWER -->
+      <div id="citationDrawer" class="citation-drawer hidden">
+        <div class="drawer-header">
+          <h3>📖 Statutory Citation Inspector</h3>
+          <button id="closeDrawerBtn" class="btn-close">✕</button>
+        </div>
+        <div id="drawerContent" class="drawer-content">
+          <!-- Populated when citation is clicked -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

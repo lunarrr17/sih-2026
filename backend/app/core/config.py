@@ -1,5 +1,14 @@
 import os
 from pathlib import Path
+from typing import Optional
+from dotenv import load_dotenv
+
+# Load .env file from project root or current working dir
+env_path = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path)
+else:
+    load_dotenv()
 
 class Settings:
     PROJECT_NAME: str = "IP-SAKTI Sahayak"
@@ -20,8 +29,12 @@ class Settings:
     QDRANT_COLLECTION_INTERNATIONAL: str = "ayurveda_international_treaties"
     
     # Embedding Model Settings
-    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-en-v1.5")
+    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
     VECTOR_DIMENSION: int = 384
+    
+    # LLM API Keys
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY", None)
+    OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY", None)
     
     # Guardrails & Confidence Threshold
     CONFIDENCE_THRESHOLD: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.60"))

@@ -1,6 +1,4 @@
 import re
-import os
-import sys
 import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -9,7 +7,6 @@ try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
 except ImportError:
-    from pypdf import PdfReader
     HAS_PYMUPDF = False
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -61,13 +58,13 @@ DOCUMENT_METADATA_REGISTRY: Dict[str, Dict[str, Any]] = {
         "category": "classical"
     },
     "Nagoya_Protocol_ABS.pdf": {
-        "statute_title": "Nagoya Protocol on Access and Benefit Sharing (CBD)",
+        "statute_title": "Nagoya Protocol on Access and Benefit-Sharing (CBD)",
         "jurisdiction": "international",
         "official_source_url": "https://www.cbd.int/abs/doc/protocol/nagoya-protocol-en.pdf",
         "category": "classical"
     },
     "WTO_TRIPS_Agreement.pdf": {
-        "statute_title": "WTO Agreement on Trade-Related Aspects of Intellectual Property Rights (TRIPS)",
+        "statute_title": "WTO TRIPS Agreement (Article 27 & Traditional Knowledge)",
         "jurisdiction": "international",
         "official_source_url": "https://www.wto.org/english/docs_e/legal_e/27-trips.pdf",
         "category": "classical"
@@ -76,7 +73,8 @@ DOCUMENT_METADATA_REGISTRY: Dict[str, Dict[str, Any]] = {
 
 class PDFStatutoryLoader:
     """
-    Extracts text page-by-page from raw official statutory PDFs,
+    High-precision statutory PDF parser using PyMuPDF (fitz).
+    Splits legal documents along natural statutory boundaries (Sections, Rules, Articles),
     identifies legal section and rule headers, and creates structured LegalChunks.
     """
 
@@ -182,7 +180,6 @@ class PDFStatutoryLoader:
         }
 
         if national_dir.exists():
-            # Deduplicate filenames in a case-insensitive manner
             seen_files = set()
             for pdf_file in sorted(national_dir.iterdir()):
                 if pdf_file.is_file() and pdf_file.suffix.lower() == ".pdf":
@@ -202,9 +199,28 @@ class PDFStatutoryLoader:
 
     def _detect_section_or_clause(self, text: str) -> str:
         """Detects specific section/rule/article mentions in the text."""
+        lower = text.lower()
+        if "traditional knowledge" in lower and ("(p)" in lower or "not patentable" in lower or "aggregation" in lower):
+            return "Section 3(p)"
+        if "mere admixture" in lower or ("(e)" in lower and "aggregation of properties" in lower):
+            return "Section 3(e)"
+        if "rule 161" in lower or "provisions of rule 161" in lower or "true list of" in lower:
+            return "Rule 161"
+        if "rule 158b" in lower or "patent or proprietary" in lower:
+            return "Rule 158B"
+        if "first schedule" in lower or "ayurvedic formulary" in lower:
+            return "First Schedule"
+
+        # Check for numbered section headers like '3. What are not inventions'
+        m_num = re.search(r'(?:^|\n)([0-9]{1,3}[A-Za-z]?)\.\s+([A-Za-z\s]{3,35})', text)
+        if m_num:
+            return f"Section {m_num.group(1)}"
+
+        # Check for explicit Section / Rule / Article keywords (excluding sub-section)
+        clean_text = re.sub(r'sub-section\s*\([0-9]+\)', '', text, flags=re.IGNORECASE)
         match = re.search(
             r'(Section\s+[0-9A-Za-z\(\)]+|Rule\s+[0-9A-Za-z\(\)]+|Article\s+[0-9A-Za-z\(\)]+|First\s+Schedule|Schedule\s+[A-Z0-9]+|Regulation\s+[0-9A-Za-z\(\)]+)',
-            text,
+            clean_text,
             re.IGNORECASE
         )
         if match:
@@ -214,7 +230,7 @@ class PDFStatutoryLoader:
     def _detect_statutory_bar(self, text: str, section: str) -> bool:
         """Flags key legal bars (like Section 3(p), Section 3(e), traditional knowledge bars)."""
         lower = text.lower()
-        if "3(p)" in section or "3(p)" in lower or "traditional knowledge" in lower and "not patentable" in lower:
+        if "3(p)" in section or "3(p)" in lower or ("traditional knowledge" in lower and "not patentable" in lower):
             return True
         if "3(e)" in section or "mere admixture" in lower:
             return True
