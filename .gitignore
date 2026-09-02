@@ -30,7 +30,8 @@ qdrant_storage/
 .DS_Store
 
 # Logs
-*.logtests/output/
+*.log
+tests/output/
 .venv/
 backend/data/.chunks_cache.pkl
 backend/data/.embeddings_cache.npz
