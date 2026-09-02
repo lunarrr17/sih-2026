@@ -109,7 +109,7 @@ class FormulationTriageEngine:
             abs_status = "EXEMPTED" if inp.is_registered_ayush_practitioner else ("ACTION_REQUIRED" if not inp.is_foreign_entity_or_nri else "MANDATORY_NBA_APPROVAL")
             abs_rationale = (
                 "STATUTORY EXEMPTION: Registered AYUSH Practitioners, Vaidyas, and community traditional healers "
-                "are statutory exempt from prior intimation and ABS fees under Section 40 Proviso of BD (Amendment) Act 2023."
+                "are statutory exempt from prior intimation and ABS fees under Section 7(1) Proviso of the Biological Diversity Act, 2002 (as amended in 2023)."
                 if inp.is_registered_ayush_practitioner
                 else "Indian commercial manufacturers must submit prior intimation to State Biodiversity Board (SBB Form I)."
             )
@@ -119,8 +119,10 @@ class FormulationTriageEngine:
                 category=ProductCategoryEnum.CLASSICAL_AYURVEDIC,
                 patent_status="BARRED",
                 patent_rationale=(
-                    "BARRED under Section 3(p) of the Patents Act, 1970 as absolute Traditional Knowledge. "
-                    "Classical formulations codified in the 54 authoritative First Schedule books belong to the public domain and are defended globally by CSIR/AYUSH TKDL."
+                    "BARRED under Section 3(p) of the Patents Act, 1970 if claimed as an unmodified classical formulation. "
+                    "Section 3(p) excludes inventions that in effect are traditional knowledge or aggregation/duplication of known properties. "
+                    "Listing in the First Schedule of the Drugs and Cosmetics Act establishes regulatory classification as a classical drug for manufacturing licensing, "
+                    "which is a distinct legal determination from patentability; any modified formulation or novel process requires separate assessment of novelty, inventive step, and statutory exclusions."
                 ),
                 abs_status=abs_status,
                 abs_rationale=abs_rationale,
@@ -134,7 +136,7 @@ class FormulationTriageEngine:
                 statutory_citations=[
                     "Drugs and Cosmetics Act, 1940 - Section 3(a), First Schedule, Rule 161",
                     "The Patents Act, 1970 - Section 3(p)",
-                    "Biological Diversity (Amendment) Act, 2023 - Section 40 Proviso"
+                    "Biological Diversity (Amendment) Act, 2023 - Section 7(1) Proviso"
                 ]
             )
 
@@ -146,8 +148,9 @@ class FormulationTriageEngine:
                 patent_status="CONDITIONALLY_ELIGIBLE",
                 patent_rationale=(
                     f"CONDITIONALLY ELIGIBLE under Section 3(e) of the Patents Act. "
-                    f"Your comparative trial data (showing {inp.synergy_percentage_increase or 30}% enhanced efficacy) "
-                    "provides empirical evidence of synergistic interaction overcoming Section 3(p) traditional knowledge admixture bars."
+                    f"Your comparative data (indicating {inp.synergy_percentage_increase or 30}% enhanced effect) "
+                    "is relevant to establishing synergistic interaction beyond mere aggregation under Section 3(e). "
+                    "However, Section 3(p) traditional knowledge exclusion and Section 3(d) enhancement of known efficacy require separate factual evaluation against cited prior art."
                 ),
                 abs_status="ACTION_REQUIRED",
                 abs_rationale="Prior intimation to State Biodiversity Board (SBB) under Section 7 of the BD Act is mandatory for commercial production.",

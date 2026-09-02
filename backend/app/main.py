@@ -133,10 +133,19 @@ async def export_dossier(req: DossierExportRequest):
         "content": dossier_content
     }
 
-# Mount frontend directory for web testing
-frontend_dir = settings.BASE_DIR / "frontend"
+# Mount frontend directory
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+frontend_dir = PROJECT_ROOT / "frontend"
+
 if frontend_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(frontend_dir), html=True),
+        name="static"
+    )
+    logger.info(f"🌐 Frontend mounted from: {frontend_dir}")
+else:
+    logger.warning(f"⚠️ Frontend directory not found: {frontend_dir}")
 
 @app.get("/")
 async def root():

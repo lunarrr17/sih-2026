@@ -188,19 +188,32 @@ function appendBotMessage(data) {
   const div = document.createElement('div');
   div.className = 'msg-bubble bot';
 
-  const confidencePct = Math.round((data.confidence_score || 0.85) * 100);
-  const formattedHtml = formatMarkdown(data.answer);
+  const isAbstain = data.abstain === true;
+  const confidencePct = Math.round((data.confidence_score || 0) * 100);
+  const formattedHtml = formatMarkdown(data.answer || '');
+
+  let badgeHtml;
+  if (isAbstain) {
+    div.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+    div.style.background = 'linear-gradient(135deg, rgba(245, 158, 11, 0.05), rgba(15, 23, 42, 0.95))';
+    badgeHtml = `<span class="confidence-badge" style="background:rgba(245,158,11,0.2); color:#fbbf24; border-color:rgba(245,158,11,0.5);">⚠️ Evidence Strength: Insufficient</span>`;
+  } else {
+    const strength = data.evidence_strength || (confidencePct >= 80 ? 'Strong' : 'Moderate');
+    badgeHtml = `<span class="confidence-badge" title="Heuristic lexical grounding index: ${(data.confidence_score || 0).toFixed(2)}. Informational only, does not imply probability of legal correctness.">🎯 Evidence Strength: ${escapeHtml(strength)}</span>`;
+  }
+
+  const jurText = (data.jurisdiction || 'NATIONAL').toUpperCase();
 
   div.innerHTML = `
     <div class="msg-header">
-      <span class="bot-name">🌿 IP-SAKTI Sahayak [${data.jurisdiction.toUpperCase()}]</span>
-      <span class="confidence-badge">🎯 ${confidencePct}% Grounded</span>
+      <span class="bot-name">🌿 IP-SAKTI Sahayak [${escapeHtml(jurText)}]</span>
+      ${badgeHtml}
     </div>
     <div class="msg-text">${formattedHtml}</div>
   `;
 
-  // Append citation pills
-  if (data.citations && data.citations.length > 0) {
+  // Append citation pills only if not an abstention and citations exist
+  if (!isAbstain && data.citations && data.citations.length > 0) {
     const pillRow = document.createElement('div');
     pillRow.className = 'citation-pill-row';
     data.citations.forEach((c) => {
@@ -221,13 +234,26 @@ function appendErrorMessage(msg) {
   const container = document.getElementById('chatMessages');
   const div = document.createElement('div');
   div.className = 'msg-bubble bot';
-  div.innerHTML = `<p style="color:#f87171;">⚠️ ${msg}</p>`;
+  div.innerHTML = `<p style="color:#f87171;">⚠️ ${escapeHtml(msg)}</p>`;
   container.appendChild(div);
 }
 
-// Markdown Formatter
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+// Markdown Formatter with HTML sanitization
 function formatMarkdown(text) {
-  return text
+  if (!text) return '';
+  // Pre-escape raw HTML
+  let clean = escapeHtml(text);
+  return clean
     .replace(/^### (.*$)/gim, '<h4 style="color:#a7f3d0; margin: 10px 0 4px;">$1</h4>')
     .replace(/^## (.*$)/gim, '<h3 style="color:#6ee7b7; margin: 12px 0 6px;">$1</h3>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
@@ -242,15 +268,28 @@ function openCitationDrawer(citation) {
   const drawer = document.getElementById('citationDrawer');
   const content = document.getElementById('drawerContent');
   const pages = citation.page_numbers && citation.page_numbers.length > 0 ? citation.page_numbers.join(', ') : "N/A";
+  const url = citation.source_url && (citation.source_url.startsWith('http://') || citation.source_url.startsWith('https://'))
+    ? citation.source_url
+    : 'https://ipindia.gov.in';
+
+  const isSecondary = citation.source_type === 'secondary_academic_study';
+  const typeBadge = isSecondary
+    ? `<span style="display:inline-block; background:rgba(168, 85, 247, 0.15); color:#c084fc; border:1px solid rgba(168,85,247,0.4); padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; margin-bottom:10px;">📘 Secondary Academic Study (Non-Gazette)</span>`
+    : `<span style="display:inline-block; background:rgba(16, 185, 129, 0.15); color:#34d399; border:1px solid rgba(16,185,129,0.4); padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; margin-bottom:10px;">🏛️ Primary Statutory Authority</span>`;
+
+  const btnLabel = isSecondary
+    ? '🔗 View Academic Journal Study ➔'
+    : '🔗 Open Official Government Gazette / Treaty ➔';
 
   content.innerHTML = `
-    <h4 style="color:#6ee7b7; margin-bottom:8px;">${citation.statute}</h4>
+    ${typeBadge}
+    <h4 style="color:#6ee7b7; margin-bottom:8px;">${escapeHtml(citation.statute)}</h4>
     <div style="background:#09130e; padding:12px; border-radius:8px; border:1px solid rgba(16,185,129,0.3); margin-bottom:12px;">
-      <p><strong>Section / Clause:</strong> ${citation.section}</p>
-      <p style="margin-top:4px;"><strong>Official Page Ref:</strong> Page ${pages}</p>
+      <p><strong>Section / Clause:</strong> ${escapeHtml(citation.section)}</p>
+      <p style="margin-top:4px;"><strong>Official Page Ref:</strong> Page ${escapeHtml(pages)}</p>
     </div>
-    <a href="${citation.source_url}" target="_blank" class="btn-primary" style="display:inline-block; text-decoration:none; text-align:center; width:100%;">
-      🔗 Open Official Government Gazette ➔
+    <a href="${encodeURI(url)}" target="_blank" rel="noopener noreferrer" class="btn-primary" style="display:inline-block; text-decoration:none; text-align:center; width:100%;">
+      ${btnLabel}
     </a>
   `;
 

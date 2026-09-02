@@ -39,20 +39,21 @@ class FormulationClassifierEngine:
                 licensing_authority="State Licensing Authority (SLA) - AYUSH Directorate",
                 ip_posture={
                     "patent_eligibility": (
-                        "BARRED under Section 3(p) of the Patents Act, 1970 as absolute Traditional Knowledge. "
-                        "Prior art defended globally via CSIR/AYUSH Traditional Knowledge Digital Library (TKDL)."
+                        "Barred under Section 3(p) of the Patents Act, 1970 if claimed as an unmodified classical formulation. "
+                        "Listing in the First Schedule of the D&C Act establishes regulatory status for drug licensing, which is distinct from patent-law Section 3(p) analysis. "
+                        "Modified formulations or novel processes require separate examination of novelty, inventive step, and statutory exclusions."
                     ),
                     "trademark_protection": "Class 5 (Brand name/logo only; generic classical names cannot be trademarked exclusively).",
                     "geographical_indication": "Applicable if manufactured using demarcated GI raw materials (e.g. Navara rice, Nilambur teak)."
                 },
                 abs_posture={
-                    "status": "EXEMPTED for Registered AYUSH Practitioners & Traditional Vaidyas under BD Act 2023 Section 40 Proviso.",
+                    "status": "EXEMPTED for Registered AYUSH Practitioners & Traditional Vaidyas under BD Act 2023 Section 7(1) Proviso.",
                     "commercial_manufacturing": "Indian entities must submit prior intimation to State Biodiversity Board (SBB) under Section 7."
                 },
                 statutory_citations=[
                     "Drugs and Cosmetics Act, 1940 - Section 3(a) & First Schedule",
                     "The Patents Act, 1970 - Section 3(p) & Section 10(4)(ii)(D)",
-                    "Biological Diversity (Amendment) Act, 2023 - Section 40 Proviso & Section 7"
+                    "Biological Diversity (Amendment) Act, 2023 - Section 7(1) Proviso & Section 7"
                 ]
             )
 
@@ -64,7 +65,7 @@ class FormulationClassifierEngine:
                 governing_regime="Drugs and Cosmetics Act, 1940 (Rule 158B)",
                 licensing_authority="State Licensing Authority (SLA)",
                 ip_posture={
-                    "patent_eligibility": "Conditional. Must overcome Section 3(p) TK bar by proving unexpected synergy under Section 3(e) with comparative trial data."
+                    "patent_eligibility": "Conditional. Synergistic interaction must be demonstrated beyond mere aggregation under Section 3(e), while modified forms or processes require separate analysis of novelty and efficacy under Section 3(d) and Section 3(p)."
                 },
                 abs_posture={
                     "status": "Prior intimation to SBB required before commercialization."

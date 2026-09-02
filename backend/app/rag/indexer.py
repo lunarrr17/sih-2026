@@ -54,9 +54,15 @@ class QdrantCorpusIndexer:
                 )
                 print(f"[OK] Collection '{col_name}' created.", flush=True)
 
-    def index_chunks(self, chunks: List[LegalChunk], collection_name: str, batch_size: int = 64) -> int:
+    def index_chunks(
+        self,
+        chunks: List[LegalChunk],
+        collection_name: str,
+        batch_size: int = 64,
+        precomputed_embeddings: Optional[Any] = None
+    ) -> int:
         """
-        Embeds chunks in batches and upserts them into the specified Qdrant collection.
+        Embeds chunks in batches (or uses precomputed vectors) and upserts them into Qdrant.
         Returns the total number of points successfully indexed.
         """
         if not chunks:
@@ -65,12 +71,17 @@ class QdrantCorpusIndexer:
         self.initialize_collections(recreate=False)
         total_indexed = 0
 
-        print(f"  -> Generating dense vectors for {len(chunks)} chunks into '{collection_name}' (batch_size={batch_size})...", flush=True)
+        print(f"  -> Upserting {len(chunks)} points into '{collection_name}'...", flush=True)
 
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i:i + batch_size]
-            texts = [c.text for c in batch]
-            embeddings = self.embedder.embed_documents(texts, batch_size=batch_size)
+            if precomputed_embeddings is not None and len(precomputed_embeddings) == len(chunks):
+                embeddings = precomputed_embeddings[i:i + batch_size]
+                if hasattr(embeddings, 'tolist'):
+                    embeddings = embeddings.tolist()
+            else:
+                texts = [c.text for c in batch]
+                embeddings = self.embedder.embed_documents(texts, batch_size=batch_size)
 
             points = []
             for chunk, vec in zip(batch, embeddings):
@@ -88,7 +99,7 @@ class QdrantCorpusIndexer:
                 points=points
             )
             total_indexed += len(points)
-            if total_indexed % 256 == 0 or total_indexed == len(chunks):
+            if total_indexed % 512 == 0 or total_indexed == len(chunks):
                 print(f"     [Progress] Indexed {total_indexed}/{len(chunks)} points...", flush=True)
 
         print(f"  [OK] Completed indexing {total_indexed} points into '{collection_name}'.", flush=True)

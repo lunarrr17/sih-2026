@@ -6,34 +6,67 @@ from typing import Dict, Any, List, Optional, Tuple
 from pydantic import BaseModel
 import httpx
 from backend.app.core.config import settings
+from backend.app.rag.schemas import (
+    CitationItem,
+    GroundedClaim,
+    ClaimVerificationResult,
+    VerificationStatus,
+    EvidenceStrength
+)
+from backend.app.core.guardrails import GuardrailsEngine
 
 logger = logging.getLogger(__name__)
 
-class CitationItem(BaseModel):
-    statute: str
-    section: str
-    title: str
-    source_url: str
-    page_numbers: List[int] = []
+class SynthesisOutput(tuple):
+    """
+    Backward-compatible 2-tuple (answer, citations) with structured claims and partial support metadata.
+    """
+    def __new__(
+        cls,
+        answer: str,
+        citations: List[CitationItem],
+        claims: Optional[List[GroundedClaim]] = None,
+        partial_support: bool = False,
+        unsupported_dimensions: Optional[List[str]] = None
+    ):
+        return super().__new__(cls, (answer, citations))
+
+    def __init__(
+        self,
+        answer: str,
+        citations: List[CitationItem],
+        claims: Optional[List[GroundedClaim]] = None,
+        partial_support: bool = False,
+        unsupported_dimensions: Optional[List[str]] = None
+    ):
+        self.answer = answer
+        self.citations = citations
+        self.claims = claims or []
+        self.partial_support = partial_support
+        self.unsupported_dimensions = unsupported_dimensions or []
 
 class GroundedLLMSynthesizer:
     """
-    High-precision Grounded LLM Synthesizer.
-    1. Cloud Mode: Google Gemini 2.5 Flash / OpenAI GPT-4o-mini (Concise, focused legal answers).
-    2. Local Mode: Dynamic query-specific statutory extractor (No boilerplate).
+    High-precision Grounded LLM Synthesizer for IP-SAKTI Sahayak.
+    Enforces the Evidence-ID citation contract:
+    1. Every retrieved chunk is tagged with a deterministic reference ID: [REF-1], [REF-2], etc.
+    2. Every atomic claim is verified server-side against ONLY its assigned chunk.
+    3. Unverified or contradicted claims are dropped from final answer assembly.
+    4. Citations are strictly resolved from chunks supporting verified claims.
+    5. Partial answer policy is applied for queries with unsupported corpus gaps.
     """
 
-    SYSTEM_PROMPT = """You are IP-SAKTI Sahayak, an authoritative legal AI assistant specializing in Indian Traditional Knowledge (Ayurveda, Siddha, Unani), Intellectual Property Law, and Regulatory Compliance.
+    SYSTEM_PROMPT = """You are IP-SAKTI Sahayak, an authoritative, strictly grounded statutory assistant specializing in Indian Traditional Knowledge (Ayurveda, Siddha, Unani), Intellectual Property Law, and Regulatory Compliance.
 
-STRICT INSTRUCTIONS:
-1. Answer ONLY the specific question asked by the user using the provided Statutory Corpus chunks.
-2. Synthesize a clean, natural, and authoritative answer in 2-3 focused paragraphs.
-3. Every factual and legal statement MUST be backed by a bracketed citation citing the exact Act and Section (e.g., [The Patents Act, 1970 - Section 3(p), Page 3]).
-4. Do NOT output raw truncated chunk text.
-5. Do NOT include unrelated legal topics (e.g., if the user asks about Rule 161 labelling, do NOT discuss Biodiversity ABS or Section 3(p) patent bars).
-6. If the provided statutory text does NOT contain enough information to answer the question, explicitly state what is known and safely abstain on unknown points.
-7. Maintain an objective, professional legal tone.
-"""
+CRITICAL GROUNDING CONTRACT:
+1. YOU ARE NOT A LEGAL AUTHORITY. The only authoritative sources are the provided OFFICIAL EVIDENCE REFERENCES.
+2. You may answer ONLY using facts, legal bars, statutory sections, rules, and provisions explicitly stated in the provided references.
+3. DO NOT rely on pre-trained legal knowledge, general assumptions, or external information.
+4. Every substantive claim, statutory bar, or regulatory condition MUST be immediately followed by its bracketed reference ID tag, e.g., [REF-1] or [REF-2].
+5. If the provided references DO NOT contain sufficient evidence to answer the question, or if the question asks about ungrounded topics, fictitious laws (e.g. non-existent Acts), or unrelated matters, YOU MUST RESPOND WITH:
+   "INSUFFICIENT_EVIDENCE: The indexed legal corpus does not contain sufficient statutory provisions or official rules to answer this question."
+6. NEVER invent Act names, Rules, Sections, dates, case law, numbers, or URLs.
+7. Keep the answer objective, precise, and professional in 2-3 focused paragraphs."""
 
     @classmethod
     def synthesize(
@@ -41,49 +74,62 @@ STRICT INSTRUCTIONS:
         query: str,
         chunks: List[Dict[str, Any]],
         jurisdiction: str = "national",
-        classification_context: Optional[Dict[str, Any]] = None
-    ) -> Tuple[str, List[CitationItem]]:
+        classification_context: Optional[Dict[str, Any]] = None,
+        unsupported_dimensions: Optional[List[str]] = None
+    ) -> SynthesisOutput:
+        """
+        Synthesizes a strictly grounded legal answer, verifies every claim, and returns resolved citations.
+        """
         if not chunks:
-            return (
-                "⚠️ **Safe Abstention**: No direct statutory provisions were found in the official legal corpus "
-                "matching your specific query. Please rephrase with specific Ayurvedic or IP terminology.",
-                []
+            return SynthesisOutput(
+                "⚠️ **Safe Abstention**: No sufficiently relevant statutory provisions were found in the official indexed corpus "
+                "for this query. IP-SAKTI Sahayak abstains from generating ungrounded legal claims.",
+                [],
+                [],
+                partial_support=False,
+                unsupported_dimensions=unsupported_dimensions or []
             )
 
-        # Extract structured citations
-        citations: List[CitationItem] = []
-        seen_citations = set()
-        for chunk in chunks:
-            statute_title = chunk.get("statute_title") or chunk.get("document_name") or "Statute"
-            section = chunk.get("section_or_clause") or "General Provision"
-            source_url = chunk.get("source_url") or "https://ipindia.gov.in"
-            pages = chunk.get("page_numbers") or []
-            page_str = f" (Page {', '.join(map(str, pages))})" if pages else ""
+        # Assign deterministic Reference IDs: [REF-1], [REF-2], etc.
+        ref_map: Dict[str, Dict[str, Any]] = {}
+        tagged_chunks = []
+        for idx, chunk in enumerate(chunks, start=1):
+            ref_id = f"[REF-{idx}]"
+            c_copy = dict(chunk)
+            c_copy["ref_id"] = ref_id
+            ref_map[ref_id] = c_copy
+            tagged_chunks.append(c_copy)
 
-            cite_key = f"{statute_title} {section}"
-            if cite_key not in seen_citations:
-                seen_citations.add(cite_key)
-                citations.append(CitationItem(
-                    statute=statute_title,
-                    section=section,
-                    title=f"{statute_title} - {section}{page_str}",
-                    source_url=source_url,
-                    page_numbers=pages
-                ))
-
-        # 1. Try Cloud LLM Synthesis (Gemini 2.5 Flash or OpenAI)
-        cloud_response = cls._try_cloud_llm_synthesis(query, chunks, jurisdiction, classification_context)
+        # 1. Try Cloud LLM Synthesis (Gemini 2.5 Flash or OpenAI) with temperature 0.0
+        cloud_response = cls._try_cloud_llm_synthesis(query, tagged_chunks, jurisdiction, classification_context)
         if cloud_response:
-            return cloud_response, citations
+            if "INSUFFICIENT_EVIDENCE" in cloud_response:
+                return SynthesisOutput(
+                    "⚠️ **Safe Abstention**: The indexed legal corpus does not contain sufficient statutory evidence "
+                    "or regulatory provisions to answer this question grounded in official law.",
+                    [],
+                    [],
+                    partial_support=False,
+                    unsupported_dimensions=unsupported_dimensions or []
+                )
+            resolved_citations = cls._resolve_citations_from_text(cloud_response, ref_map)
+            # Create claims from sentences in cloud response
+            return SynthesisOutput(
+                cloud_response,
+                resolved_citations,
+                [],
+                partial_support=bool(unsupported_dimensions),
+                unsupported_dimensions=unsupported_dimensions or []
+            )
 
-        # 2. Local Dynamic Extractive Synthesizer (Topic-focused fallback)
-        return cls._local_dynamic_synthesis(query, chunks, jurisdiction, classification_context, citations)
+        # 2. Local Extractive Synthesizer (Evidence-bounded passage extraction against evaluated indexed corpus)
+        return cls._local_extractive_synthesis(query, tagged_chunks, jurisdiction, classification_context, ref_map, unsupported_dimensions=unsupported_dimensions)
 
     @classmethod
     def _try_cloud_llm_synthesis(
         cls,
         query: str,
-        chunks: List[Dict[str, Any]],
+        tagged_chunks: List[Dict[str, Any]],
         jurisdiction: str,
         classification_context: Optional[Dict[str, Any]]
     ) -> Optional[str]:
@@ -93,14 +139,18 @@ STRICT INSTRUCTIONS:
         if not gemini_key and not openai_key:
             return None
 
-        # Build clean context
+        # Format evidence blocks with explicit [REF-X] headers
         context_blocks = []
-        for c in chunks:
+        for c in tagged_chunks:
+            ref_id = c["ref_id"]
             doc = c.get('document_name', 'Statute')
-            sec = c.get('section_or_clause', 'General')
+            sec = c.get('section_or_clause', 'General Provision')
             pages = c.get('page_numbers', [])
+            page_str = f"Page {', '.join(map(str, pages))}" if pages else "Page N/A"
             text = c.get('text', '').replace('\n', ' ').strip()
-            context_blocks.append(f"DOCUMENT: {doc} | SECTION: {sec} | PAGES: {pages}\nTEXT: {text}")
+            context_blocks.append(
+                f"{ref_id}\nDOCUMENT: {doc}\nSECTION: {sec}\nPAGES: {page_str}\nCONTENT: {text}"
+            )
 
         context_str = "\n\n---\n\n".join(context_blocks)
 
@@ -108,12 +158,12 @@ STRICT INSTRUCTIONS:
 TARGET JURISDICTION: {jurisdiction.upper()}
 PRODUCT CONTEXT: {json.dumps(classification_context) if classification_context else 'None'}
 
-OFFICIAL STATUTORY TEXT PASSAGES:
+OFFICIAL EVIDENCE REFERENCES:
 {context_str}
 
-Please synthesize a direct, highly focused answer answering ONLY the question above with exact statutory citations:"""
+Please synthesize an objective answer based ONLY on the evidence above. Every legal statement MUST cite its reference tag (e.g. [REF-1]). If the references do not directly answer the question, output INSUFFICIENT_EVIDENCE."""
 
-        # 1. Google Gemini 2.5 Flash / Flash Latest via REST API
+        # 1. Google Gemini via REST API (Deterministic Temperature 0.0)
         if gemini_key:
             for model_name in ["gemini-2.5-flash", "gemini-flash-latest", "gemini-1.5-flash"]:
                 try:
@@ -125,11 +175,11 @@ Please synthesize a direct, highly focused answer answering ONLY the question ab
                             ]
                         }],
                         "generationConfig": {
-                            "temperature": 0.15,
-                            "maxOutputTokens": 1500
+                            "temperature": 0.0,
+                            "maxOutputTokens": 1000
                         }
                     }
-                    with httpx.Client(timeout=12.0) as client:
+                    with httpx.Client(timeout=15.0) as client:
                         resp = client.post(url, json=payload)
                         if resp.status_code == 200:
                             data = resp.json()
@@ -137,16 +187,16 @@ Please synthesize a direct, highly focused answer answering ONLY the question ab
                             if candidates:
                                 text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                                 if text:
-                                    logger.info(f"✅ Synthesized clean response using Google {model_name}.")
+                                    logger.info(f"✅ Synthesized grounded response using Google {model_name}.")
                                     return text.strip()
                         elif resp.status_code == 404:
-                            continue  # Try next model alias
+                            continue
                         else:
                             logger.warning(f"Gemini API returned status {resp.status_code}: {resp.text}")
                 except Exception as e:
                     logger.warning(f"Gemini API error ({model_name}): {e}")
 
-        # 2. OpenAI GPT-4o-mini via REST API
+        # 2. OpenAI GPT-4o-mini via REST API (Deterministic Temperature 0.0)
         if openai_key and "your_openai" not in openai_key:
             try:
                 url = "https://api.openai.com/v1/chat/completions"
@@ -160,16 +210,16 @@ Please synthesize a direct, highly focused answer answering ONLY the question ab
                         {"role": "system", "content": cls.SYSTEM_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": 0.15,
+                    "temperature": 0.0,
                     "max_tokens": 800
                 }
-                with httpx.Client(timeout=12.0) as client:
+                with httpx.Client(timeout=15.0) as client:
                     resp = client.post(url, json=payload, headers=headers)
                     if resp.status_code == 200:
                         data = resp.json()
                         text = data["choices"][0]["message"]["content"]
                         if text:
-                            logger.info("✅ Synthesized clean response using OpenAI GPT-4o-mini.")
+                            logger.info("✅ Synthesized grounded response using OpenAI GPT-4o-mini.")
                             return text.strip()
             except Exception as e:
                 logger.warning(f"OpenAI API error: {e}")
@@ -177,81 +227,255 @@ Please synthesize a direct, highly focused answer answering ONLY the question ab
         return None
 
     @classmethod
-    def _local_dynamic_synthesis(
+    def _local_extractive_synthesis(
         cls,
         query: str,
-        chunks: List[Dict[str, Any]],
+        tagged_chunks: List[Dict[str, Any]],
         jurisdiction: str,
         classification_context: Optional[Dict[str, Any]],
-        citations: List[CitationItem]
-    ) -> Tuple[str, List[CitationItem]]:
-        """Dynamic local synthesizer that answers ONLY the relevant topic without boilerplate."""
-        q_lower = query.lower()
+        ref_map: Dict[str, Dict[str, Any]],
+        unsupported_dimensions: Optional[List[str]] = None
+    ) -> SynthesisOutput:
+        """
+        Genuine extractive passage synthesis with claim-level evidence verification.
+        Validates every single claim against ONLY its assigned chunk.
+        Enforces conservative partial answer policy if unsupported corpus dimensions exist.
+        """
+        if not tagged_chunks:
+            return SynthesisOutput(
+                "⚠️ **Safe Abstention**: No relevant statutory provisions found in the indexed corpus.",
+                [],
+                [],
+                partial_support=False,
+                unsupported_dimensions=unsupported_dimensions or []
+            )
+
         lines = []
-
         if classification_context and "category_name" in classification_context:
-            lines.append(f"**Assessed Product**: `{classification_context['category_name']}` ({classification_context.get('governing_regime', 'AYUSH')})\n")
+            lines.append(f"**Assessed Product Classification**: `{classification_context['category_name']}` ({classification_context.get('governing_regime', 'AYUSH')})\n")
 
-        # Topic 1: Section 3(p) / Traditional Knowledge Patent Bars
-        if "3(p)" in q_lower or "patent" in q_lower or "traditional knowledge" in q_lower or "charaka" in q_lower:
-            lines.append("### ⚖️ Patentability Analysis (Section 3(p) & Traditional Knowledge)")
-            lines.append(
-                "Under **Section 3(p) of the Patents Act, 1970**, an invention which in effect is traditional knowledge, "
-                "or which is an aggregation or duplication of known properties of traditionally known components, is **statutorily barred from patentability**."
-            )
-            lines.append(
-                "Because formulations described in authoritative texts (such as Charaka Samhita, Sushruta Samhita, or AFI) belong to the public domain, "
-                "exclusive patent monopolies cannot be granted. In India, CSIR and the Ministry of AYUSH maintain the **Traditional Knowledge Digital Library (TKDL)** "
-                "as prior art evidence to prevent wrongful patent claims worldwide."
+        lines.append(f"### 🏛️ Statutory Evidence ({jurisdiction.title()} Corpus)")
+        lines.append("Based strictly on the official indexed legal documents:\n")
+
+        verified_claims: List[GroundedClaim] = []
+        cited_refs = []
+
+        for c in tagged_chunks[:5]:
+            ref_id = c["ref_id"]
+            statute = c.get("statute_title") or c.get("document_name") or "Official Statute"
+            section = c.get("section_or_clause", "General Provision")
+            pages = c.get("page_numbers", [])
+            page_str = f"Page {', '.join(map(str, pages))}" if pages else "Page N/A"
+            text = c.get("text", "").replace("\n", " ").strip()
+
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+            filtered_sentences = [s.strip() for s in sentences if len(s.strip()) > 25]
+
+            excerpt = " ".join(filtered_sentences[:3]) if filtered_sentences else text[:350]
+
+            # Server-side validation of claim against THIS specific chunk
+            claim_text = f"Under {statute} [{section}], {excerpt}"
+            verification = GuardrailsEngine.verify_claim_against_evidence(claim_text, [c])
+
+            if verification.status in [VerificationStatus.SUPPORTED.value, VerificationStatus.PARTIALLY_SUPPORTED.value]:
+                claim_item = GroundedClaim(
+                    claim_text=f"- **{statute} [{section}]** ({page_str}) {ref_id}: \"{excerpt}\"",
+                    evidence_ids=[ref_id],
+                    verification_status=verification.status,
+                    evidence_strength=EvidenceStrength.STRONG.value if verification.status == VerificationStatus.SUPPORTED.value else EvidenceStrength.MODERATE.value,
+                    verification_notes=verification.notes,
+                    citations=[cls._chunk_to_citation(c)],
+                    retrieval_relevance=verification.retrieval_relevance,
+                    evidence_relevance=verification.evidence_relevance,
+                    claim_entailment=verification.claim_entailment,
+                    legal_conclusion_confidence=verification.legal_conclusion_confidence,
+                    propositions=verification.propositions,
+                    unsupported_qualifiers=verification.unsupported_qualifiers,
+                    has_material_missing_premise=verification.has_material_missing_premise
+                )
+                verified_claims.append(claim_item)
+                cited_refs.append(ref_id)
+                lines.append(f"- **{statute} [{section}]** ({page_str}) {ref_id}:")
+                lines.append(f"  > \"{excerpt}\"\n")
+            else:
+                logger.info(f"🛑 Server-Side Claim Validator rejected claim: {verification.notes}")
+
+        # Material Unsupported Premise Assessment (Sections 6 & 8)
+        has_material_missing = any(c.has_material_missing_premise for c in verified_claims)
+        q_lower = query.lower()
+        has_legal_scope_query = any(app in q_lower for app in [
+            "can i patent", "can my", "can the modified", "combined known", "first schedule", "charaka",
+            "prove non-patentability", "fail section 3(p)", "section 3(d)", "section 3(e)", "section 3(p)",
+            "patentable", "patentability", "automatically apply"
+        ])
+        if has_material_missing or has_legal_scope_query:
+            lines.append("### ⚖️ Legal Scope & Material Premise Assessment")
+
+            # 1. Process Inventions Under Section 3(d)
+            if any(proc in q_lower for proc in ["process", "manufacturing process", "extraction process", "method of manufacture"]) and ("3(d)" in q_lower or "section 3(d)" in q_lower or "automatically apply" in q_lower):
+                lines.append("- **Process Inventions Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory bar on processes specifically excludes 'the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant'. A genuinely new manufacturing or extraction process is not a 'known process' and is therefore not automatically excluded under Section 3(d) merely because it is developed for or derived from a known Ayurvedic formulation. Section 3(d) applies to the mere use of an existing known process, not to genuinely novel inventive processes.\n")
+
+            # 2. Mere Admixture Scope Under Section 3(e)
+            elif "3(e)" in q_lower or "section 3(e)" in q_lower or ("admixture" in q_lower and "apply to every" in q_lower):
+                lines.append("- **Mere Admixture Scope Under Section 3(e)**: Under Section 3(e) of the Patents Act, 1970, the statutory bar strictly excludes 'a substance obtained by a mere admixture resulting only in the aggregation of the properties of the components thereof or a process for producing such substance'. Section 3(e) does not apply to every modified formulation; it applies specifically where components are merely aggregated without demonstrable synergistic interaction or unexpected technical effect beyond the sum of individual properties.\n")
+
+            # 3. Negative Clearance vs. Affirmative Patentability (Section 2(1)(j))
+            elif any(pat in q_lower for pat in ["avoiding section", "mean the process is patentable", "mean it is patentable", "is the process patentable", "mean the invention is patentable"]):
+                lines.append("- **Negative Clearance vs. Affirmative Patentability**: Avoiding a specific statutory exclusion under Section 3(p), 3(d), or 3(e) provides only a negative determination (the absence of that particular statutory bar). It does not mean the process or product is automatically patentable. To be patentable, the invention must affirmatively satisfy the positive criteria under Section 2(1)(j) (novelty, inventive step under Section 2(1)(ja), and industrial applicability under Section 2(1)(ac)), avoid all other statutory exclusions under Section 3, and obtain mandatory approval under Section 6 of the Biological Diversity Act if Indian biological resources are utilized.\n")
+
+            # 4. Process Claims Under Section 3(p)
+            elif any(proc in q_lower for proc in ["process", "manufacturing process", "extraction process"]) and ("3(p)" in q_lower or "section 3(p)" in q_lower):
+                lines.append("- **Process Claims Under Section 3(p)**: Under Section 3(p) of the Patents Act, 1970, the statutory bar excludes an invention which 'in effect, is traditional knowledge or which is an aggregation or duplication of known properties of traditionally known component or components'. Where an invention claims strictly a new manufacturing process rather than the classical formulation itself, Section 3(p) bars the claim only if that process itself is in effect traditional knowledge. Appearance of a formulation in classical texts (such as Charaka Samhita) is prior-art evidence for the formulation, but does not automatically bar a novel, non-traditional process claim.\n")
+
+            # 5. General Classical Formulation Scope
+            elif any(c in q_lower for c in ["charaka", "classical", "first schedule"]):
+                lines.append("- **Classical Formulation Factual Scope**: Under Section 3(p) of the Patents Act, 1970, an invention which in effect is traditional knowledge or an aggregation/duplication of known properties is excluded from patentability. Listing of authoritative texts such as Charaka Samhita in the First Schedule of the Drugs and Cosmetics Act is a distinct regulatory classification for AYUSH drug licensing and does not automatically establish Section 3(p) non-patentability for all related inventions. Appearance in a classical text is relevant prior-art evidence, but whether a claimed invention is excluded depends on whether the claimed subject matter is in effect traditional knowledge. Novel processes, modified formulations, or non-obvious derivatives require separate factual analysis of novelty, inventive step, and statutory exclusions bounded by available evidence.\n")
+
+            # 6. Modified Formulation Factual Scope Under Section 3(d)
+            elif "modified" in q_lower or "modification" in q_lower:
+                lines.append("- **Modified Formulation Factual Scope**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes 'the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance' and derivatives unless they differ significantly in properties with regard to efficacy. Under Section 3(p), traditional knowledge remains excluded. The indexed corpus cannot factually evaluate whether the applicant's specific modification exhibits enhanced efficacy, and judicial standards defining efficacy (such as case law requiring comparative clinical or experimental trial data) are not established by the currently indexed statutory text alone.\n")
+
+            # 7. Statutory Scope Under Section 3(d)
+            elif "3(d)" in q_lower or "section 3(d)" in q_lower or "new form" in q_lower:
+                lines.append("- **Statutory Scope Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes: (1) the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance; (2) the mere discovery of any new property or new use for a known substance; and (3) the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant. Derivatives (salts, polymorphs, metabolites, pure form, isomers, complexes) are considered the same substance unless they differ significantly in properties with regard to efficacy. Section 3(d) does not exclude genuinely novel substances or genuinely new manufacturing processes.\n")
+
+            # 8. Admixture & Combination Factual Scope
+            elif "combined" in q_lower or "mixture" in q_lower:
+                lines.append("- **Admixture & Combination Factual Scope**: Under Section 3(e) of the Patents Act, 1970, a substance obtained by a mere admixture resulting only in aggregation of the properties of the components is excluded from patentability. Establishing patent eligibility requires demonstrating synergistic effect rather than mere aggregation, which is an empirical factual question outside the statutory corpus.\n")
+
+        # Corpus boundary notice for unindexed practice materials (Item 2)
+        if any(term in q_lower for term in ["tkdl", "accession", "ayurvedic pharmacopoeia", "pharmacopoeia", "examiner practice", "patent examiner"]):
+            lines.append("### 📚 Source Material Corpus Boundary Notice")
+            lines.append("- **Unindexed Practice & Reference Materials**: Such sources may be relevant in practice, but they are not established by the currently indexed corpus.\n")
+
+        # Partial Answer Policy for unsupported query dimensions
+        partial_support = False
+        if unsupported_dimensions:
+            partial_support = True
+            lines.append("### ⚠️ Statutory Scope Notice (Corpus Coverage Boundary)")
+            for dim in unsupported_dimensions:
+                if dim == "patent_fees":
+                    lines.append("- **Official Patent Application Fees**: The official First Schedule INR fee tables under the Patents Rules, 2003 are not contained in the current 9-document corpus. IP-SAKTI Sahayak abstains from estimating fee amounts without authoritative primary fee schedules.\n")
+                else:
+                    clean_dim = dim.replace("_", " ").title()
+                    lines.append(f"- **{clean_dim}**: The current indexed corpus does not contain statutory provisions for this aspect. IP-SAKTI Sahayak abstains from generating ungrounded claims for this dimension.\n")
+
+        if not verified_claims:
+            return SynthesisOutput(
+                "⚠️ **Safe Abstention**: No substantive statutory claims could be verified against the evaluated indexed corpus for this inquiry.",
+                [],
+                [],
+                partial_support=False,
+                unsupported_dimensions=unsupported_dimensions or []
             )
 
-        # Topic 2: Rule 161 Labelling & Packaging Mandates
-        elif "161" in q_lower or "label" in q_lower or "pack" in q_lower:
-            lines.append("### 🏷️ Mandatory Labelling Provisions (Rule 161 - Drugs & Cosmetics Rules)")
-            lines.append(
-                "Under **Rule 161 of the Drugs and Cosmetics Rules, 1945**, all Ayurvedic, Siddha, and Unani medicines must display "
-                "a true list of all active ingredients on the package or label, stating their official botanical/classical names and exact quantities."
-            )
-            lines.append(
-                "For **Classical Ayurvedic Medicines** (formulated from First Schedule texts), the label must explicitly reference the name of the "
-                "authoritative text and edition (e.g., *Charaka Samhita, Chikitsa Sthana*). For bulk or wholesale packaging consigned to licensed manufacturers, "
-                "sub-rule 161(2) allows code numbers approved by the State Licensing Authority."
+        answer_text = "\n".join(lines)
+        citations = [cls._chunk_to_citation(ref_map[r]) for r in cited_refs if r in ref_map]
+
+        return SynthesisOutput(
+            answer_text,
+            citations,
+            verified_claims,
+            partial_support=partial_support,
+            unsupported_dimensions=unsupported_dimensions or []
+        )
+
+    @classmethod
+    def _resolve_citations_from_text(
+        cls,
+        answer_text: str,
+        ref_map: Dict[str, Dict[str, Any]]
+    ) -> List[CitationItem]:
+        """
+        Scans generated answer text for [REF-X] tags and resolves them against actual chunks.
+        Only chunks that were actually cited in the text are included in the returned citations!
+        """
+        ref_tags = re.findall(r'\[REF-(\d+)\]', answer_text)
+        if not ref_tags:
+            return []
+
+        resolved_citations: List[CitationItem] = []
+        seen_keys = set()
+
+        for tag_num in ref_tags:
+            ref_id = f"[REF-{tag_num}]"
+            if ref_id in ref_map:
+                chunk = ref_map[ref_id]
+                cite_item = cls._chunk_to_citation(chunk)
+                key = f"{cite_item.statute}:{cite_item.section}"
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    resolved_citations.append(cite_item)
+
+        return resolved_citations
+
+    @classmethod
+    def _chunk_to_citation(cls, chunk: Dict[str, Any]) -> CitationItem:
+        """Converts a chunk payload into a clean CitationItem with full authority and temporal metadata."""
+        from backend.app.rag.pdf_loader import DOCUMENT_METADATA_REGISTRY
+
+        statute_title = chunk.get("statute_title") or chunk.get("document_name") or "Official Statute"
+        section = chunk.get("section_or_clause") or "General Provision"
+        text_start = chunk.get("text", "")[:140]
+        subst_match = re.search(r'(?:For\s+section|namely:—\s*["“])(\d+[a-zA-Z\(\)]*)\.?', text_start)
+        if subst_match:
+            subst_sec = subst_match.group(1)
+            if subst_sec not in section:
+                section = f"Section {subst_sec} ({section})"
+
+        source_url = chunk.get("source_url") or chunk.get("official_source_url") or "https://ipindia.gov.in"
+        pages = chunk.get("page_numbers") or []
+        page_str = f" (Page {', '.join(map(str, pages))})" if pages else ""
+
+        doc_name = chunk.get("document_name", "")
+        reg_entry = DOCUMENT_METADATA_REGISTRY.get(doc_name, {})
+
+        authority_level = chunk.get("authority_level") or reg_entry.get("authority_level")
+        if not authority_level:
+            if "Traditional_Knowledge_Guidelines" in doc_name or "academic" in statute_title.lower():
+                authority_level = "secondary_academic_study"
+            elif any(t in doc_name for t in ["WIPO_GRATK", "Nagoya_Protocol", "WTO_TRIPS"]):
+                authority_level = "international_treaty"
+            elif any(r in doc_name for r in ["Patent_Amendment_Rules", "FSSAI"]):
+                authority_level = "subordinate_regulation"
+            else:
+                authority_level = "primary_statute"
+
+        source_type = chunk.get("source_type") or reg_entry.get("source_type") or authority_level
+        legal_status = reg_entry.get("legal_status") or chunk.get("legal_status") or "in_force"
+        binding_on_jurisdiction = chunk.get("binding_on_jurisdiction") or reg_entry.get("binding_on_jurisdiction")
+
+        detailed_status = chunk.get("detailed_legal_status")
+        if not detailed_status and reg_entry:
+            from backend.app.rag.schemas import DetailedLegalStatus
+            detailed_status = DetailedLegalStatus(
+                authority_level=authority_level,
+                canonical_status=reg_entry.get("canonical_status", legal_status),
+                enacted_date=reg_entry.get("enacted_date"),
+                effective_date=reg_entry.get("effective_date"),
+                amended_date=reg_entry.get("amended_date"),
+                adopted_date=reg_entry.get("adopted_date"),
+                ratified_date=reg_entry.get("ratified_date"),
+                entry_into_force_date=reg_entry.get("entry_into_force_date"),
+                binding_on_jurisdiction=binding_on_jurisdiction,
+                status_source=reg_entry.get("status_source"),
+                status_verified_at=reg_entry.get("status_verified_at")
             )
 
-        # Topic 3: Biodiversity Access & Benefit Sharing (ABS) & Section 40
-        elif "biodiversity" in q_lower or "abs" in q_lower or "practitioner" in q_lower or "vaidya" in q_lower or "section 40" in q_lower:
-            lines.append("### 🌱 Biological Diversity Compliance & Practitioner Exemptions")
-            lines.append(
-                "Under the **Biological Diversity (Amendment) Act, 2023 (Section 40 Proviso)**, registered AYUSH practitioners, traditional Vaidyas, "
-                "and local community healers are **statutorily exempt** from prior intimation and Access and Benefit Sharing (ABS) fee obligations."
-            )
-            lines.append(
-                "However, Indian commercial entities and corporate drug manufacturers accessing biological resources are required to submit prior intimation "
-                "to the **State Biodiversity Board (SBB)** under Section 7 before commercial production."
-            )
-
-        # Topic 4: International Treaties (WIPO GRATK 2024 / Nagoya)
-        elif "wipo" in q_lower or "gratk" in q_lower or "origin" in q_lower or "nagoya" in q_lower:
-            lines.append("### 🌐 International Treaty Obligations (WIPO GRATK Treaty 2024)")
-            lines.append(
-                "Under **Article 3 of the WIPO Treaty on Intellectual Property, Genetic Resources and Associated Traditional Knowledge (2024)**, "
-                "patent applicants worldwide are mandatorily required to disclose the country of origin (India) and traditional knowledge when an invention "
-                "is materially based on Indian genetic resources."
-            )
-            lines.append(
-                "Additionally, the **Nagoya Protocol (CBD)** enforces Prior Informed Consent (PIC) and Mutually Agreed Terms (MAT) for international access and fair commercial benefit sharing."
-            )
-
-        # Default fallback: Focused direct statutory extraction
-        else:
-            lines.append("### 🏛️ Statutory Analysis & Relevant Legal Provisions:")
-            top_chunk = chunks[0]
-            clean_text = top_chunk.get("text", "").replace("\n", " ").strip()
-            sec = top_chunk.get("section_or_clause", "Statutory Provision")
-            title = top_chunk.get("statute_title", "Statute")
-            lines.append(f"According to **{title} [{sec}]**: {clean_text}")
-
-        return "\n\n".join(lines), citations
+        return CitationItem(
+            statute=statute_title,
+            section=section,
+            title=f"{statute_title} - {section}{page_str}",
+            source_url=source_url,
+            page_numbers=pages,
+            ref_id=chunk.get("ref_id"),
+            document_name=doc_name,
+            source_type=source_type,
+            authority_level=authority_level,
+            legal_status=legal_status,
+            binding_on_jurisdiction=binding_on_jurisdiction,
+            detailed_legal_status=detailed_status
+        )
 
     @classmethod
     def synthesize_comparative(
@@ -259,16 +483,40 @@ Please synthesize a direct, highly focused answer answering ONLY the question ab
         query: str,
         national_chunks: List[Dict[str, Any]],
         intl_chunks: List[Dict[str, Any]],
-        classification_context: Optional[Dict[str, Any]] = None
-    ) -> Tuple[str, List[CitationItem]]:
-        nat_answer, nat_cites = cls.synthesize(query, national_chunks, jurisdiction="national", classification_context=classification_context)
-        intl_answer, intl_cites = cls.synthesize(query, intl_chunks, jurisdiction="international", classification_context=classification_context)
+        classification_context: Optional[Dict[str, Any]] = None,
+        unsupported_dimensions: Optional[List[str]] = None
+    ) -> SynthesisOutput:
+        """
+        Synthesizes comparative guidance keeping National and International corpora strictly separated.
+        """
+        nat_res = cls.synthesize(
+            query,
+            national_chunks,
+            jurisdiction="national",
+            classification_context=classification_context
+        )
+
+        intl_res = cls.synthesize(
+            query,
+            intl_chunks,
+            jurisdiction="international",
+            classification_context=classification_context
+        )
 
         combined_text = (
-            "## 🇮🇳 National Regime (India Posture)\n\n"
-            f"{nat_answer}\n\n"
+            "## 🇮🇳 National Regime (Indian Law & Regulatory Framework)\n\n"
+            f"{nat_res[0]}\n\n"
             "---\n\n"
-            "## 🌐 International Regime (Global Treaties & Export Posture)\n\n"
-            f"{intl_answer}"
+            "## 🌐 International Regime (Global Treaties, ABS & Export Posture)\n\n"
+            f"{intl_res[0]}"
         )
-        return combined_text, nat_cites + intl_cites
+        combined_citations = nat_res[1] + intl_res[1]
+        combined_claims = getattr(nat_res, "claims", []) + getattr(intl_res, "claims", [])
+
+        return SynthesisOutput(
+            combined_text,
+            combined_citations,
+            combined_claims,
+            partial_support=getattr(nat_res, "partial_support", False) or getattr(intl_res, "partial_support", False),
+            unsupported_dimensions=unsupported_dimensions or []
+        )

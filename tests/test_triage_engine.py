@@ -11,7 +11,7 @@ def engine():
     return FormulationTriageEngine()
 
 def test_pure_classical_formulation_triage(engine):
-    """Classical text formula: Barred under §3(p), Exempt under BD Act §40 for Vaidyas."""
+    """Classical text formula: Barred under §3(p), Exempt under BD Act §7(1) Proviso for Vaidyas."""
     inp = TriageFormulationInput(
         product_name="Maha Triphala Ghrita",
         is_first_schedule_text=True,
@@ -27,7 +27,7 @@ def test_pure_classical_formulation_triage(engine):
     assert res.patent_status == "BARRED"
     assert "Section 3(p)" in res.patent_rationale
     assert res.abs_status == "EXEMPTED"
-    assert "Section 40" in res.abs_rationale
+    assert "Section 7(1)" in res.abs_rationale
     assert "First Schedule" in res.licensing_framework
 
 def test_proprietary_formulation_with_synergy(engine):
