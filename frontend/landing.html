@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IP-SAKTI Sahayak — Ancient Wisdom. Intelligent Protection.</title>
+  <meta name="description" content="AI-powered intellectual property and regulatory intelligence for Ayurveda. Protect innovation. Preserve tradition. Empower the future." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,600&family=Inter:wght@300;400;500;600;700&family=Cinzel:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="landing.css" />
+</head>
+<body>
+
+  <!-- ===================== NAVBAR ===================== -->
+  <nav class="navbar" id="navbar">
+    <div class="nav-inner">
+      <div class="nav-brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M18 3 C18 3 10 8 8 18 C6 28 12 33 18 33 C24 33 30 28 28 18 C26 8 18 3 18 3Z" stroke="#BFA76F" stroke-width="1.5" fill="none"/>
+            <path d="M18 8 C18 8 22 12 22 18 C22 24 18 28 18 28" stroke="#3E7C59" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M18 8 C18 8 14 12 14 18 C14 24 18 28 18 28" stroke="#3E7C59" stroke-width="1.5" stroke-linecap="round"/>
+            <circle cx="18" cy="18" r="2.5" fill="#BFA76F"/>
+          </svg>
+        </div>
+        <span class="brand-name">IP-SAKTI <em>SAHAYAK</em></span>
+      </div>
+      <div class="nav-links">
+        <a href="#hero">Home</a>
+        <a href="#live-demo">Live Demo</a>
+      </div>
+      <div class="nav-cta">
+        <span class="api-status-badge" id="apiStatusBadge" title="Backend API Status">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusLabel">Checking...</span>
+        </span>
+        <a href="index.html" class="btn-nav-cta">Open Application ➔</a>
+      </div>
+      <button class="nav-hamburger" id="navHamburger" aria-label="Menu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ===================== HERO ===================== -->
+  <section class="hero" id="hero">
+    <!-- Three.js 3D particle canvas -->
+    <canvas id="heroCanvas"></canvas>
+
+    <!-- Floating leaves -->
+    <div class="leaves-container" id="leavesContainer"></div>
+
+    <!-- Atmospheric fog -->
+    <div class="fog-layer fog-1"></div>
+    <div class="fog-layer fog-2"></div>
+
+    <!-- Hero Content -->
+    <div class="hero-content" id="heroContent">
+      <div class="hero-eyebrow">
+        <span class="eyebrow-line"></span>
+        <span class="eyebrow-text">Ayurveda × Artificial Intelligence × Intellectual Property</span>
+        <span class="eyebrow-line"></span>
+      </div>
+
+      <h1 class="hero-headline">
+        <span class="headline-line headline-ancient" data-parallax="0.03">ANCIENT</span>
+        <span class="headline-line headline-wisdom" data-parallax="0.02">WISDOM.</span>
+        <span class="headline-divider">
+          <span class="divider-ornament">❧</span>
+        </span>
+        <span class="headline-line headline-intelligent" data-parallax="0.04">INTELLIGENT</span>
+        <span class="headline-line headline-protection" data-parallax="0.025">PROTECTION.</span>
+      </h1>
+
+      <p class="hero-sub">AI-powered intellectual property and regulatory intelligence for Ayurveda.</p>
+      <p class="hero-sub2">Protect innovation. Preserve tradition. Empower the future.</p>
+
+      <div class="hero-buttons">
+        <a href="index.html" class="btn-primary-hero" id="btnExplore">
+          <span class="btn-leaf">🌿</span>
+          <span>Launch Workspace</span>
+          <span class="btn-glow"></span>
+        </a>
+        <a href="#live-demo" class="btn-secondary-hero">
+          <span>Try Live Demo</span>
+          <span class="btn-arrow">↓</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- 3D Ancient Book with growing plants -->
+    <div class="book-container" id="bookContainer">
+      <div class="book-wrapper" id="bookWrapper">
+        <div class="book" id="book3D">
+          <div class="book-spine"></div>
+          <div class="book-page-left">
+            <div class="manuscript-content left-content">
+              <div class="ms-ornament top-ornament"></div>
+              <div class="ms-script-lines">
+                <div class="ms-line" style="width:80%"></div>
+                <div class="ms-line" style="width:95%"></div>
+                <div class="ms-line" style="width:70%"></div>
+                <div class="ms-line" style="width:88%"></div>
+                <div class="ms-line" style="width:75%"></div>
+                <div class="ms-line" style="width:92%"></div>
+                <div class="ms-line" style="width:65%"></div>
+                <div class="ms-line" style="width:85%"></div>
+              </div>
+              <div class="ms-decoration mandala-left"></div>
+            </div>
+          </div>
+          <div class="book-page-right">
+            <div class="manuscript-content right-content">
+              <div class="ms-script-lines">
+                <div class="ms-line" style="width:78%"></div>
+                <div class="ms-line" style="width:90%"></div>
+                <div class="ms-line" style="width:82%"></div>
+                <div class="ms-line" style="width:70%"></div>
+                <div class="ms-line" style="width:96%"></div>
+                <div class="ms-line" style="width:74%"></div>
+                <div class="ms-line" style="width:88%"></div>
+                <div class="ms-line" style="width:60%"></div>
+              </div>
+              <div class="ms-decoration mandala-right"></div>
+              <div class="ms-ornament bottom-ornament"></div>
+            </div>
+          </div>
+          <!-- Plants growing from book -->
+          <div class="plants-container" id="plantsContainer">
+            <div class="plant plant-1"><div class="stem"><div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div></div></div>
+            <div class="plant plant-2"><div class="stem"><div class="leaf l1"></div><div class="leaf l2"></div></div></div>
+            <div class="plant plant-3"><div class="stem"><div class="leaf l1"></div><div class="leaf l2"></div><div class="leaf l3"></div><div class="leaf l4"></div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Neural Network overlay -->
+    <canvas class="neural-canvas" id="neuralCanvas"></canvas>
+  </section>
+
+  <!-- ===================== LIVE DEMO ===================== -->
+  <section class="section-live-demo" id="live-demo">
+    <div class="container">
+      <div class="section-header reveal-up">
+        <span class="section-tag">Live AI Demo</span>
+        <h2 class="section-title">Ask IP-SAKTI <em>Right Now</em></h2>
+        <p class="section-desc">No sign-up needed. Ask any question about Ayurvedic intellectual property or regulatory compliance — grounded in official statutes.</p>
+      </div>
+
+      <div class="demo-card reveal-up">
+        <div class="demo-inner">
+          <div class="demo-chat-area" id="demoChatArea">
+            <div class="demo-msg bot-demo">
+              <span class="demo-avatar">🌿</span>
+              <div class="demo-bubble">
+                <p>Namaste! I am <strong>IP-SAKTI Sahayak</strong>. Ask me anything about Ayurvedic IP, patents, or regulatory compliance. I am grounded in official statutory sources.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="demo-suggestions">
+            <button class="demo-chip" onclick="landingAsk('Can a classical formulation from Charaka Samhita be patented?')">§3(p) Patent Bar</button>
+            <button class="demo-chip" onclick="landingAsk('What is Section 40 of the Biodiversity Act?')">§40 BD Act Exemption</button>
+            <button class="demo-chip" onclick="landingAsk('WIPO GRATK Treaty 2024 mandatory disclosures')">WIPO GRATK 2024</button>
+          </div>
+
+          <div class="demo-input-row">
+            <input type="text" id="demoInput" class="demo-input" placeholder="Ask an Ayurvedic IPR question..." autocomplete="off" />
+            <button id="demoSendBtn" class="demo-send-btn" onclick="landingAsk()">
+              <span>Ask</span>
+              <span class="demo-send-arrow">→</span>
+            </button>
+          </div>
+
+          <p class="demo-disclaimer">AI responses are grounded in statutory sources. Not formal legal advice. <a href="index.html">Open full workspace →</a></p>
+        </div>
+
+        <div class="demo-side-info">
+          <div class="demo-stat-block">
+            <div class="demo-stat-icon">⚡</div>
+            <div>
+              <span class="demo-stat-num" id="backendStatus">Connecting...</span>
+              <span class="demo-stat-label">Backend Status</span>
+            </div>
+          </div>
+          <div class="demo-stat-block">
+            <div class="demo-stat-icon">📚</div>
+            <div>
+              <span class="demo-stat-num">2 Collections</span>
+              <span class="demo-stat-label">National + International Qdrant</span>
+            </div>
+          </div>
+          <div class="demo-stat-block">
+            <div class="demo-stat-icon">🧠</div>
+            <div>
+              <span class="demo-stat-num">Hybrid RAG</span>
+              <span class="demo-stat-label">BM25 + Qdrant + Cross-Encoder</span>
+            </div>
+          </div>
+          <div class="demo-tech-badges">
+            <span class="tech-badge">FastAPI</span>
+            <span class="tech-badge">Qdrant</span>
+            <span class="tech-badge">Gemini</span>
+            <span class="tech-badge">all-MiniLM</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="footer">
+    <div class="footer-leaves"></div>
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <span class="brand-name">IP-SAKTI <em>SAHAYAK</em></span>
+        <p>Ancient Wisdom. Intelligent Protection.</p>
+      </div>
+      <div class="footer-links">
+        <a href="#hero">Home</a>
+        <a href="#live-demo">Live Demo</a>
+        <a href="index.html">Application</a>
+      </div>
+      <p class="footer-copy">© 2026 IP-SAKTI Sahayak · SIH 2026 · Built with ❤️ for Ayurveda</p>
+    </div>
+  </footer>
+
+  <!-- Three.js CDN (for 3D hero) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="landing.js"></script>
+</body>
+</html>
