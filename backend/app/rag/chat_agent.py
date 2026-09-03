@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.rag.retriever import retriever
 from backend.app.rag.generator import GroundedLLMSynthesizer
-from backend.app.rag.schemas import GroundedClaim, CitationItem, EvidenceStrength
+from backend.app.rag.schemas import GroundedClaim, CitationItem, EvidenceStrength, EvidenceRecord, ClaimRecord
 from backend.app.core.guardrails import GuardrailsEngine
 from backend.app.engines.triage_engine import (
     triage_engine,
@@ -34,7 +34,9 @@ class ChatAgentResponse(BaseModel):
     abstain: bool
     partial_support: bool = False
     claims: List[GroundedClaim] = []
+    claim_records: List[ClaimRecord] = []
     citations: List[CitationItem] = []
+    evidence_records: List[EvidenceRecord] = []
     triage_result: Optional[TriageFormulationOutput] = None
     escalation_available: bool = True
 
@@ -106,7 +108,11 @@ class LegalChatAgent:
         # must route explicitly through comparative retrieval to keep evidence packs separated.
         has_intl_need = any(w in q_lower for w in ["nagoya", "cbd", "trips", "wipo", "gratk", "international treaty", "international regime", "global treaties"])
         has_nat_need = any(w in q_lower for w in ["india", "indian", "domestic", "biological diversity", "patents act", "drugs and cosmetics", "section 3", "rule 161", "sbb", "nba"])
-        is_explicit_comparison = any(c in q_lower for c in ["both national and international", "compare national and international", "compare indian patent", "comparison between", "comparative analysis"]) or (has_intl_need and any(c in q_lower for c in ["compare", "comparison", "comparative", "versus", " vs "]))
+        is_explicit_comparison = (
+            any(c in q_lower for c in ["both national and international", "compare national and international", "compare indian patent", "comparison between", "comparative analysis"])
+            or (has_intl_need and has_nat_need and any(c in q_lower for c in ["compare", "comparison", "comparative", "contrast", "versus", " vs ", "differ", "difference", "with the"]))
+            or (has_intl_need and any(c in q_lower for c in ["compare", "comparison", "comparative", "contrast", "versus", " vs ", "differ", "difference"]))
+        )
         is_india_nagoya_abs = ("nagoya" in q_lower and any(w in q_lower for w in ["india", "indian"]) and any(b in q_lower for b in ["access and benefit", "benefit sharing", "abs", "position"]))
 
         if target_jur in ["comparative", "both"] or is_explicit_comparison or is_india_nagoya_abs:
@@ -167,6 +173,9 @@ class LegalChatAgent:
         if len(self.session_memory[session_id]) > 10:
             self.session_memory[session_id] = self.session_memory[session_id][-10:]
 
+        evidence_records = getattr(synth_res, "evidence_records", [])
+        claim_records = getattr(synth_res, "claim_records", [])
+
         return ChatAgentResponse(
             query=request.query,
             jurisdiction=request.jurisdiction,
@@ -179,7 +188,9 @@ class LegalChatAgent:
             abstain=grounding_eval["abstain"],
             partial_support=partial_support,
             claims=claims,
+            claim_records=claim_records,
             citations=citations,
+            evidence_records=evidence_records,
             triage_result=triage_output,
             escalation_available=True
         )

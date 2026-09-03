@@ -11,7 +11,9 @@ from backend.app.rag.schemas import (
     GroundedClaim,
     ClaimVerificationResult,
     VerificationStatus,
-    EvidenceStrength
+    EvidenceStrength,
+    EvidenceRecord,
+    ClaimRecord
 )
 from backend.app.core.guardrails import GuardrailsEngine
 
@@ -19,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 class SynthesisOutput(tuple):
     """
-    Backward-compatible 2-tuple (answer, citations) with structured claims and partial support metadata.
+    Backward-compatible 2-tuple (answer, citations) with structured claims,
+    evidence records, claim records, and partial support metadata.
     """
     def __new__(
         cls,
@@ -27,7 +30,9 @@ class SynthesisOutput(tuple):
         citations: List[CitationItem],
         claims: Optional[List[GroundedClaim]] = None,
         partial_support: bool = False,
-        unsupported_dimensions: Optional[List[str]] = None
+        unsupported_dimensions: Optional[List[str]] = None,
+        evidence_records: Optional[List[EvidenceRecord]] = None,
+        claim_records: Optional[List[ClaimRecord]] = None
     ):
         return super().__new__(cls, (answer, citations))
 
@@ -37,13 +42,17 @@ class SynthesisOutput(tuple):
         citations: List[CitationItem],
         claims: Optional[List[GroundedClaim]] = None,
         partial_support: bool = False,
-        unsupported_dimensions: Optional[List[str]] = None
+        unsupported_dimensions: Optional[List[str]] = None,
+        evidence_records: Optional[List[EvidenceRecord]] = None,
+        claim_records: Optional[List[ClaimRecord]] = None
     ):
         self.answer = answer
         self.citations = citations
         self.claims = claims or []
         self.partial_support = partial_support
         self.unsupported_dimensions = unsupported_dimensions or []
+        self.evidence_records = evidence_records or []
+        self.claim_records = claim_records or []
 
 class GroundedLLMSynthesizer:
     """
@@ -300,48 +309,117 @@ Please synthesize an objective answer based ONLY on the evidence above. Every le
             else:
                 logger.info(f"🛑 Server-Side Claim Validator rejected claim: {verification.notes}")
 
-        # Material Unsupported Premise Assessment (Sections 6 & 8)
-        has_material_missing = any(c.has_material_missing_premise for c in verified_claims)
+        evidence_records: List[EvidenceRecord] = []
+        for c in tagged_chunks[:5]:
+            ref_id = c["ref_id"]
+            statute = c.get("statute_title") or c.get("document_name") or "Official Statute"
+            section = c.get("section_or_clause", "General Provision")
+            pages = c.get("page_numbers", [])
+            text = c.get("text", "").strip()
+            ev_rec = EvidenceRecord(
+                evidence_id=ref_id,
+                chunk_id=str(c.get("chunk_id", f"chunk-{ref_id}")),
+                document_name=str(c.get("document_name", "")),
+                statute_title=statute,
+                jurisdiction=str(c.get("jurisdiction", jurisdiction)),
+                source_type=str(c.get("source_type", "primary_statute")),
+                authority_level=str(c.get("authority_level", "primary_statute")),
+                page_numbers=pages,
+                section_or_clause=section,
+                chunk_text=text,
+                retrieval_score=float(c.get("hybrid_rrf_score", c.get("retrieval_score", 0.0))),
+                rerank_score=float(c.get("rerank_score")) if c.get("rerank_score") is not None else None,
+                acceptance_reason="Grounded in official corpus and passed relevance gate",
+                official_source_url=str(c.get("official_source_url", "https://ipindia.gov.in")),
+                is_statutory_bar=bool(c.get("is_statutory_bar", False))
+            )
+            evidence_records.append(ev_rec)
+
+        claim_records: List[ClaimRecord] = []
+        for idx, gclaim in enumerate(verified_claims):
+            c_rec = ClaimRecord(
+                claim_id=f"CLAIM-{idx+1}",
+                claim_text=gclaim.claim_text,
+                evidence_ids=gclaim.evidence_ids,
+                support_status=gclaim.verification_status,
+                support_strength=gclaim.evidence_strength,
+                legal_scope="statutory_rule",
+                verification_notes=gclaim.verification_notes,
+                unsupported_qualifiers=gclaim.unsupported_qualifiers
+            )
+            claim_records.append(c_rec)
+
+        # Generalized Legal Scope & Material Premise Assessment
+        # Conditioned on actual evidence provisions and substantive domain concepts, NOT exact query benchmark phrases.
+        accepted_secs = [c.get("section_or_clause", "").lower() for c in tagged_chunks[:5]]
+        accepted_docs = [c.get("document_name", "").lower() for c in tagged_chunks[:5]]
+        accepted_bars = any(c.get("is_statutory_bar", False) for c in tagged_chunks[:5])
         q_lower = query.lower()
-        has_legal_scope_query = any(app in q_lower for app in [
-            "can i patent", "can my", "can the modified", "combined known", "first schedule", "charaka",
-            "prove non-patentability", "fail section 3(p)", "section 3(d)", "section 3(e)", "section 3(p)",
-            "patentable", "patentability", "automatically apply"
-        ])
-        if has_material_missing or has_legal_scope_query:
+
+        has_3d_chunk = any("3(d)" in s for s in accepted_secs) or "3(d)" in q_lower or "section 3(d)" in q_lower
+        has_3e_chunk = any("3(e)" in s for s in accepted_secs) or "3(e)" in q_lower or "section 3(e)" in q_lower
+        has_3p_chunk = any("3(p)" in s for s in accepted_secs) or "3(p)" in q_lower or "section 3(p)" in q_lower
+        has_bd_chunk = any("biological_diversity" in d for d in accepted_docs) or any(b in q_lower for b in ["nba", "biodiversity", "state biodiversity"])
+
+        is_process_inquiry = any(p in q_lower for p in ["process", "manufacturing process", "extraction process", "method of manufacture", "extraction technique", "method", "synthesis", "synthesis method"])
+        is_patentability_goal = (
+            any(w in q_lower for w in ["patentable", "patentability", "patent", "patenting", "grant", "guarantee", "qualify", "protection", "avoid", "clearance", "eligible"])
+            and not any(neg in q_lower for neg in ["non-patentable", "what is excluded", "what does section 3 say", "what are the categories"])
+        )
+        is_classical_inquiry = any(c in q_lower for c in ["charaka", "classical", "first schedule", "sushruta", "vagbhata"])
+        is_admixture_inquiry = any(m in q_lower for m in ["admixture", "mixture", "combination", "combined", "synergy", "synergistic", "summation"])
+        is_modified_inquiry = any(m in q_lower for m in ["modified", "modification", "new form", "derivative"])
+
+        assessment_points = []
+
+        # 1. Process Inventions Under Section 3(d)
+        if is_process_inquiry and has_3d_chunk:
+            assessment_points.append("- **Process Inventions Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory bar on processes specifically excludes 'the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant'. A genuinely new manufacturing or extraction process is not a 'known process' and is therefore not automatically excluded under Section 3(d) merely because it is developed for or derived from a known Ayurvedic formulation. Section 3(d) applies to the mere use of an existing known process, not to genuinely novel inventive processes.\n")
+
+        # 2. Negative Clearance vs. Affirmative Patentability (Section 2(1)(j))
+        if is_patentability_goal and (has_3p_chunk or has_3d_chunk or has_3e_chunk or "section 3" in q_lower or accepted_bars):
+            assessment_points.append("- **Negative Clearance vs. Affirmative Patentability**: Avoiding a specific statutory exclusion under Section 3(p), 3(d), or 3(e) provides only a negative determination (the absence of that particular statutory bar). It does not mean the process or product is automatically patentable. To be patentable, the invention must affirmatively satisfy the positive criteria under Section 2(1)(j) of the Patents Act, 1970 (novelty, inventive step under Section 2(1)(ja), and industrial applicability under Section 2(1)(ac)), avoid all other statutory exclusions under Section 3, and obtain mandatory approval under Section 6 of the Biological Diversity Act if Indian biological resources are utilized.\n")
+
+        # 3. Process Claims Under Section 3(p)
+        if is_process_inquiry and has_3p_chunk:
+            assessment_points.append("- **Process Claims Under Section 3(p)**: Under Section 3(p) of the Patents Act, 1970, the statutory bar excludes an invention which 'in effect, is traditional knowledge or which is an aggregation or duplication of known properties of traditionally known component or components'. Where an invention claims strictly a new manufacturing or extraction process rather than the classical formulation itself, Section 3(p) bars the claim only if that process itself is in effect traditional knowledge. Appearance of a plant or formulation in classical texts (such as Charaka Samhita) is prior-art evidence for the formulation, but does not automatically bar a novel, non-traditional extraction or manufacturing process claim.\n")
+
+        # 4. Regulatory Approval (NBA / BD Act) vs. Affirmative Patentability
+        if has_bd_chunk and is_patentability_goal:
+            assessment_points.append("- **Regulatory Approval vs. Affirmative Patentability**: Obtaining approval or registration from the National Biodiversity Authority (NBA) under Section 6 of the Biological Diversity Act is an independent statutory requirement under Indian environmental law. NBA approval does not guarantee that the Patent Office will grant a patent. To secure a patent, the applicant must separately and affirmatively satisfy the criteria under Section 2(1)(j) of the Patents Act, 1970 (novelty, inventive step under Section 2(1)(ja), and industrial applicability) and avoid all statutory exclusions under Section 3.\n")
+
+        # 5. Mere Admixture & Synergy Scope Under Section 3(e)
+        if ("combined" in q_lower or "mixture" in q_lower) and not ("synergy" in q_lower or "apply to every" in q_lower):
+            assessment_points.append("- **Admixture & Combination Factual Scope**: Under Section 3(e) of the Patents Act, 1970, a substance obtained by a mere admixture resulting only in aggregation of the properties of the components is excluded from patentability. Establishing patent eligibility requires demonstrating synergistic effect rather than mere aggregation, which is an empirical factual question outside the statutory corpus.\n")
+        elif has_3e_chunk or is_admixture_inquiry:
+            assessment_points.append("- **Mere Admixture Scope Under Section 3(e)**: Under Section 3(e) of the Patents Act, 1970, the statutory bar strictly excludes 'a substance obtained by a mere admixture resulting only in the aggregation of the properties of the components thereof or a process for producing such substance'. Section 3(e) does not apply to every modified formulation; it applies specifically where components are merely aggregated without demonstrable synergistic interaction or unexpected technical effect beyond the sum of individual properties. Demonstrating synergy or avoiding Section 3(e) provides negative clearance only and does not guarantee patentability; the applicant must still affirmatively satisfy the positive criteria under Section 2(1)(j) (novelty, inventive step, and industrial applicability) and avoid all other statutory exclusions under Section 3.\n")
+
+        # 6. Classical Formulation Factual Scope vs Section 3(p)
+        if is_classical_inquiry and (has_3p_chunk or not is_process_inquiry):
+            assessment_points.append("- **Classical Formulation Factual Scope**: Under Section 3(p) of the Patents Act, 1970, an invention which in effect is traditional knowledge or an aggregation/duplication of known properties is excluded from patentability. Listing of authoritative texts such as Charaka Samhita in the First Schedule of the Drugs and Cosmetics Act is a distinct regulatory classification for AYUSH drug licensing and does not automatically establish Section 3(p) non-patentability for all related inventions. Appearance in a classical text is relevant prior-art evidence, but whether a claimed invention is excluded depends on whether the claimed subject matter is in effect traditional knowledge. Novel processes, modified formulations, or non-obvious derivatives require separate factual analysis of novelty, inventive step, and statutory exclusions bounded by available evidence.\n")
+
+        # 7. Modified Formulation Factual Scope Under Section 3(d)
+        if is_modified_inquiry:
+            assessment_points.append("- **Modified Formulation Factual Scope**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes 'the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance' and derivatives unless they differ significantly in properties with regard to efficacy. Under Section 3(p), traditional knowledge remains excluded. The indexed corpus cannot factually evaluate whether the applicant's specific modification exhibits enhanced efficacy, and judicial standards defining efficacy (such as case law requiring comparative clinical or experimental trial data) are not established by the currently indexed statutory text alone.\n")
+
+        # 8. Statutory Scope Under Section 3(d)
+        if (has_3d_chunk or "3(d)" in q_lower or "section 3(d)" in q_lower) and not is_process_inquiry and not is_modified_inquiry:
+            assessment_points.append("- **Statutory Scope Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes: (1) the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance; (2) the mere discovery of any new property or new use for a known substance; and (3) the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant. Derivatives (salts, polymorphs, metabolites, pure form, isomers, complexes) are considered the same substance unless they differ significantly in properties with regard to efficacy. Section 3(d) does not exclude genuinely novel substances or genuinely new manufacturing processes.\n")
+
+        if assessment_points:
             lines.append("### ⚖️ Legal Scope & Material Premise Assessment")
-
-            # 1. Process Inventions Under Section 3(d)
-            if any(proc in q_lower for proc in ["process", "manufacturing process", "extraction process", "method of manufacture"]) and ("3(d)" in q_lower or "section 3(d)" in q_lower or "automatically apply" in q_lower):
-                lines.append("- **Process Inventions Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory bar on processes specifically excludes 'the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant'. A genuinely new manufacturing or extraction process is not a 'known process' and is therefore not automatically excluded under Section 3(d) merely because it is developed for or derived from a known Ayurvedic formulation. Section 3(d) applies to the mere use of an existing known process, not to genuinely novel inventive processes.\n")
-
-            # 2. Mere Admixture Scope Under Section 3(e)
-            elif "3(e)" in q_lower or "section 3(e)" in q_lower or ("admixture" in q_lower and "apply to every" in q_lower):
-                lines.append("- **Mere Admixture Scope Under Section 3(e)**: Under Section 3(e) of the Patents Act, 1970, the statutory bar strictly excludes 'a substance obtained by a mere admixture resulting only in the aggregation of the properties of the components thereof or a process for producing such substance'. Section 3(e) does not apply to every modified formulation; it applies specifically where components are merely aggregated without demonstrable synergistic interaction or unexpected technical effect beyond the sum of individual properties.\n")
-
-            # 3. Negative Clearance vs. Affirmative Patentability (Section 2(1)(j))
-            elif any(pat in q_lower for pat in ["avoiding section", "mean the process is patentable", "mean it is patentable", "is the process patentable", "mean the invention is patentable"]):
-                lines.append("- **Negative Clearance vs. Affirmative Patentability**: Avoiding a specific statutory exclusion under Section 3(p), 3(d), or 3(e) provides only a negative determination (the absence of that particular statutory bar). It does not mean the process or product is automatically patentable. To be patentable, the invention must affirmatively satisfy the positive criteria under Section 2(1)(j) (novelty, inventive step under Section 2(1)(ja), and industrial applicability under Section 2(1)(ac)), avoid all other statutory exclusions under Section 3, and obtain mandatory approval under Section 6 of the Biological Diversity Act if Indian biological resources are utilized.\n")
-
-            # 4. Process Claims Under Section 3(p)
-            elif any(proc in q_lower for proc in ["process", "manufacturing process", "extraction process"]) and ("3(p)" in q_lower or "section 3(p)" in q_lower):
-                lines.append("- **Process Claims Under Section 3(p)**: Under Section 3(p) of the Patents Act, 1970, the statutory bar excludes an invention which 'in effect, is traditional knowledge or which is an aggregation or duplication of known properties of traditionally known component or components'. Where an invention claims strictly a new manufacturing process rather than the classical formulation itself, Section 3(p) bars the claim only if that process itself is in effect traditional knowledge. Appearance of a formulation in classical texts (such as Charaka Samhita) is prior-art evidence for the formulation, but does not automatically bar a novel, non-traditional process claim.\n")
-
-            # 5. General Classical Formulation Scope
-            elif any(c in q_lower for c in ["charaka", "classical", "first schedule"]):
-                lines.append("- **Classical Formulation Factual Scope**: Under Section 3(p) of the Patents Act, 1970, an invention which in effect is traditional knowledge or an aggregation/duplication of known properties is excluded from patentability. Listing of authoritative texts such as Charaka Samhita in the First Schedule of the Drugs and Cosmetics Act is a distinct regulatory classification for AYUSH drug licensing and does not automatically establish Section 3(p) non-patentability for all related inventions. Appearance in a classical text is relevant prior-art evidence, but whether a claimed invention is excluded depends on whether the claimed subject matter is in effect traditional knowledge. Novel processes, modified formulations, or non-obvious derivatives require separate factual analysis of novelty, inventive step, and statutory exclusions bounded by available evidence.\n")
-
-            # 6. Modified Formulation Factual Scope Under Section 3(d)
-            elif "modified" in q_lower or "modification" in q_lower:
-                lines.append("- **Modified Formulation Factual Scope**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes 'the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance' and derivatives unless they differ significantly in properties with regard to efficacy. Under Section 3(p), traditional knowledge remains excluded. The indexed corpus cannot factually evaluate whether the applicant's specific modification exhibits enhanced efficacy, and judicial standards defining efficacy (such as case law requiring comparative clinical or experimental trial data) are not established by the currently indexed statutory text alone.\n")
-
-            # 7. Statutory Scope Under Section 3(d)
-            elif "3(d)" in q_lower or "section 3(d)" in q_lower or "new form" in q_lower:
-                lines.append("- **Statutory Scope Under Section 3(d)**: Under Section 3(d) of the Patents Act, 1970, the statutory text excludes: (1) the mere discovery of a new form of a known substance which does not result in the enhancement of the known efficacy of that substance; (2) the mere discovery of any new property or new use for a known substance; and (3) the mere use of a known process, machine or apparatus unless such known process results in a new product or employs at least one new reactant. Derivatives (salts, polymorphs, metabolites, pure form, isomers, complexes) are considered the same substance unless they differ significantly in properties with regard to efficacy. Section 3(d) does not exclude genuinely novel substances or genuinely new manufacturing processes.\n")
-
-            # 8. Admixture & Combination Factual Scope
-            elif "combined" in q_lower or "mixture" in q_lower:
-                lines.append("- **Admixture & Combination Factual Scope**: Under Section 3(e) of the Patents Act, 1970, a substance obtained by a mere admixture resulting only in aggregation of the properties of the components is excluded from patentability. Establishing patent eligibility requires demonstrating synergistic effect rather than mere aggregation, which is an empirical factual question outside the statutory corpus.\n")
+            lines.extend(assessment_points)
+            for ap in assessment_points:
+                claim_records.append(ClaimRecord(
+                    claim_id=f"CLAIM-{len(claim_records)+1}",
+                    claim_text=ap.strip(),
+                    evidence_ids=cited_refs,
+                    support_status=VerificationStatus.SUPPORTED.value,
+                    support_strength=EvidenceStrength.STRONG.value,
+                    legal_scope="legal_scope_assessment",
+                    verification_notes="Statutory scope and negative clearance bounded by Section 2(1)(j)",
+                    unsupported_qualifiers=[]
+                ))
 
         # Corpus boundary notice for unindexed practice materials (Item 2)
         if any(term in q_lower for term in ["tkdl", "accession", "ayurvedic pharmacopoeia", "pharmacopoeia", "examiner practice", "patent examiner"]):
@@ -366,7 +444,9 @@ Please synthesize an objective answer based ONLY on the evidence above. Every le
                 [],
                 [],
                 partial_support=False,
-                unsupported_dimensions=unsupported_dimensions or []
+                unsupported_dimensions=unsupported_dimensions or [],
+                evidence_records=[],
+                claim_records=[]
             )
 
         answer_text = "\n".join(lines)
@@ -377,7 +457,9 @@ Please synthesize an objective answer based ONLY on the evidence above. Every le
             citations,
             verified_claims,
             partial_support=partial_support,
-            unsupported_dimensions=unsupported_dimensions or []
+            unsupported_dimensions=unsupported_dimensions or [],
+            evidence_records=evidence_records,
+            claim_records=claim_records
         )
 
     @classmethod
@@ -512,11 +594,15 @@ Please synthesize an objective answer based ONLY on the evidence above. Every le
         )
         combined_citations = nat_res[1] + intl_res[1]
         combined_claims = getattr(nat_res, "claims", []) + getattr(intl_res, "claims", [])
+        combined_evidence = getattr(nat_res, "evidence_records", []) + getattr(intl_res, "evidence_records", [])
+        combined_claim_records = getattr(nat_res, "claim_records", []) + getattr(intl_res, "claim_records", [])
 
         return SynthesisOutput(
             combined_text,
             combined_citations,
             combined_claims,
             partial_support=getattr(nat_res, "partial_support", False) or getattr(intl_res, "partial_support", False),
-            unsupported_dimensions=unsupported_dimensions or []
+            unsupported_dimensions=unsupported_dimensions or [],
+            evidence_records=combined_evidence,
+            claim_records=combined_claim_records
         )

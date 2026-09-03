@@ -302,6 +302,21 @@ class PDFStatutoryLoader:
                                 if jur == "national" and ("mere discovery of a new form" in chunk.text.lower() or ("known substance" in chunk.text.lower() and "enhancement of the known efficacy" in chunk.text.lower())):
                                     chunk.metadata.section_or_clause = "Section 3(d)"
                                     chunk.metadata.is_statutory_bar = True
+                                if jur == "national" and "patents_act_1970" in chunk.metadata.document_name.lower():
+                                    if 2 in chunk.metadata.page_numbers:
+                                        chunk.metadata.section_or_clause = "Section 2"
+                                    elif 31 in chunk.metadata.page_numbers or 32 in chunk.metadata.page_numbers:
+                                        if "revocation" in chunk.text.lower() or "source or geographical origin" in chunk.text.lower() or "anticipated having regard to the knowledge" in chunk.text.lower():
+                                            chunk.metadata.section_or_clause = "Section 64"
+                                    elif 15 in chunk.metadata.page_numbers or 16 in chunk.metadata.page_numbers:
+                                        if "opposition" in chunk.text.lower() and ("source or geographical origin" in chunk.text.lower() or "local or indigenous community" in chunk.text.lower()):
+                                            chunk.metadata.section_or_clause = "Section 25"
+                                if jur == "national" and "biological_diversity" in chunk.metadata.document_name.lower():
+                                    m_principal = re.search(r'(?:in|for)\s+section\s+([0-9]{1,3}[A-Za-z]?)\s+of\s+the\s+principal\s+act', chunk.text, re.IGNORECASE)
+                                    if m_principal:
+                                        chunk.metadata.section_or_clause = f"Section {m_principal.group(1)}"
+                                    elif "intellectual property" in chunk.text.lower() and ("section 6" in chunk.text.lower() or "register with the national biodiversity" in chunk.text.lower()):
+                                        chunk.metadata.section_or_clause = "Section 6"
                                 if jur == "national" and "patent_amendment_rules" in chunk.metadata.document_name.lower():
                                     if chunk.metadata.section_or_clause.startswith("Section"):
                                         chunk.metadata.section_or_clause = "General Provision"
@@ -309,6 +324,20 @@ class PDFStatutoryLoader:
                                     if 13 in chunk.metadata.page_numbers:
                                         if "article 27" in chunk.text.lower() or "patentable subject matter" in chunk.text.lower() or "exclude from patentability" in chunk.text.lower():
                                             chunk.metadata.section_or_clause = "Article 27"
+                                if jur == "international" and "nagoya" in chunk.metadata.document_name.lower():
+                                    if 4 in chunk.metadata.page_numbers:
+                                        chunk.metadata.section_or_clause = "Preamble"
+                                    elif "compliance with domestic legislation" in chunk.text.lower():
+                                        chunk.metadata.section_or_clause = "Article 15"
+                                    elif 5 in chunk.metadata.page_numbers or 6 in chunk.metadata.page_numbers:
+                                        if "access to traditional knowledge" in chunk.text.lower():
+                                            chunk.metadata.section_or_clause = "Article 7"
+                                        elif "fair and equitable" in chunk.text.lower() or "benefits arising" in chunk.text.lower():
+                                            chunk.metadata.section_or_clause = "Article 5"
+                                        elif "prior informed consent" in chunk.text.lower() or "access to genetic resources" in chunk.text.lower():
+                                            chunk.metadata.section_or_clause = "Article 6"
+                                    elif chunk.metadata.section_or_clause.startswith("Section"):
+                                        chunk.metadata.section_or_clause = "General Provision"
                         print(f"📦 Loaded {len(cached_results['national'])} national and {len(cached_results['international'])} international chunks from cache.", flush=True)
                         return cached_results
             except Exception as e:
@@ -362,12 +391,28 @@ class PDFStatutoryLoader:
                 return "Section 3(p)"
             if "mere admixture" in lower or ("(e)" in lower and "aggregation of properties" in lower):
                 return "Section 3(e)"
+            if "patents_act" in filename.lower() and ("source or geographical origin" in lower or "local or indigenous community" in lower):
+                if "revocation" in lower or "revoked" in lower:
+                    return "Section 64"
+                if "opposition" in lower or "opponent" in lower:
+                    return "Section 25"
+        if "biological_diversity" in filename.lower():
+            m_principal = re.search(r'(?:in|for)\s+section\s+([0-9]{1,3}[A-Za-z]?)\s+of\s+the\s+principal\s+act', text, re.IGNORECASE)
+            if m_principal:
+                return f"Section {m_principal.group(1)}"
+            if "intellectual property" in lower and ("section 6" in lower or "register with the national biodiversity" in lower):
+                return "Section 6"
         if "rule 161" in lower or "provisions of rule 161" in lower or "true list of" in lower:
             return "Rule 161"
         if "rule 158b" in lower or "patent or proprietary" in lower:
             return "Rule 158B"
         if "first schedule" in lower or "ayurvedic formulary" in lower:
             return "First Schedule"
+        if "nagoya" in filename.lower():
+            if "compliance with domestic legislation" in lower:
+                return "Article 15"
+            if "the parties to this protocol" in lower or "recalling that the fair" in lower:
+                return "Preamble"
 
         # 1. Clean out Gazette notification headers and preambles
         clean_text = re.sub(r'\[?\s*part\s*[-–—I|]+\s*(?:sec\.|section)\s*[0-9\(\)a-z]+\]?', '', text, flags=re.IGNORECASE)

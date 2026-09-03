@@ -25,7 +25,12 @@ class GuardrailsEngine:
         r'\b(quantum computing|quantum cryptography)\b',
         r'\b(criminal homicide|murder|theft|robbery)\b',
         r'\b(software\w*|algorithms?|source code|computer programs? per se)\b',
-        r'\b(ayurveda intellectual property protection act|national ayurvedic herbal export promotion act|ayurvedic clinical trials regulation act|ayurveda special patent fast-track act)\b'
+        r'\b(ayurveda intellectual property protection act|national ayurvedic herbal export promotion act|ayurvedic clinical trials regulation act|ayurveda special patent fast-track act)\b',
+        r'\b(european patent convention|epc\s+article|35\s+u\.?s\.?c\.?|uspto|united states patent act|german patent act|uk patents act)\b',
+        r'\b(schedule m\b|synthetic allopathic|allopathic injectables?)\b',
+        r'\b((?:supreme|high)\s+court\b|court\s+ruling|ruling\s+of\s+the|judicial\s+precedent|case\s+law\s+holding|novartis\s+ag\s+v|novartis\s+case|dabur\s+vs\s+baidyanath)\b',
+        r'\bsection\s+[2-9][0-9]{2,}\b',
+        r'\barticle\s+(?:[4-9][0-9]+|3[7-9])\b'
     ]
 
     AYURVEDA_LEGAL_KEYWORDS = [
@@ -48,7 +53,8 @@ class GuardrailsEngine:
         "any", "both", "each", "few", "more", "most", "other", "some", "such", "no", "nor",
         "not", "only", "own", "same", "so", "than", "too", "very", "can", "cannot", "will", "just",
         "should", "now", "is", "are", "was", "were", "be", "been", "being", "have", "has",
-        "had", "having", "do", "does", "did", "doing", "this", "that", "these", "those"
+        "had", "having", "do", "does", "did", "doing", "this", "that", "these", "those",
+        "must", "may", "shall"
     }
 
     KNOWN_DOC_PATTERNS = [
@@ -80,7 +86,11 @@ class GuardrailsEngine:
         'category', 'categories', 'class', 'classes', 'subject', 'matter', 'govern', 'governs',
         'governed', 'governing', 'currently', 'presently', 'today', 'bound', 'signing', 'signed',
         'interact', 'interaction', 'relationship', 'relate', 'related', 'worldwide', 'mandates', 'mandate',
-        'need', 'needs', 'preparing', 'prepare', 'patients', 'patient', 'want', 'wants', 'produce', 'producing', 'seek', 'seeking'
+        'need', 'needs', 'preparing', 'prepare', 'patients', 'patient', 'want', 'wants', 'produce', 'producing', 'seek', 'seeking',
+        'set', 'out', 'laid', 'down', 'satisfied', 'satisfy', 'take', 'effect', 'internationally', 'enterprise', 'develop',
+        'develops', 'developed', 'active', 'fractions', 'contrast', 'detail', 'details', 'elaborate', 'deal', 'deals',
+        'summation', 'techniques', 'technique', 'isolated', 'isolate', 'isolating', 'condition', 'conditions', 'legal',
+        'threshold', 'globally', 'required', 'obligation', 'obligations'
     }
 
     SYNONYM_GROUPS: List[Set[str]] = [
@@ -92,7 +102,10 @@ class GuardrailsEngine:
         {'knowledge', 'wisdom', 'lore'},
         {'formulation', 'formulations', 'formula', 'formulas', 'composition', 'compositions', 'preparation', 'product', 'substance', 'invention', 'component', 'components'},
         {'synergy', 'synergistic', 'unexpected', 'enhancement'},
-        {'admixture', 'mixture', 'aggregation', 'combination'},
+        {'admixture', 'mixture', 'aggregation', 'combination', 'summation'},
+        {'polymorph', 'polymorphic', 'polymorphs', 'isomer', 'isomers', 'isomeric', 'derivative', 'derivatives', 'forms', 'form'},
+        {'therapeutic', 'efficacy', 'effect', 'healing', 'treatment'},
+        {'extraction', 'isolate', 'isolating', 'technique', 'process', 'method'},
         {'origin', 'source', 'provenance', 'geographical'},
         {'disclosure', 'disclose', 'disclosed', 'declaration', 'declaring', 'declare'},
         {'benefit', 'benefits', 'benefit-sharing', 'abs', 'approval', 'nba', 'sbb', 'intimation', 'prior'},
@@ -178,6 +191,26 @@ class GuardrailsEngine:
                             "reason": f"Query specifically asks about {doc_key}, but retrieved evidence contains no authoritative provisions from {doc_file}."
                         }
 
+        # Check non-existent treaty articles
+        if "nagoya" in q_lower:
+            m_art = re.findall(r'\barticle\s+([0-9]+)\b', q_lower)
+            for a in m_art:
+                if int(a) > 36:
+                    return {
+                        "aligned": False,
+                        "ratio": 0.0,
+                        "reason": f"Nagoya Protocol contains only Articles 1 through 36; Article {a} does not exist."
+                    }
+        if "gratk" in q_lower or "wipo" in q_lower:
+            m_art = re.findall(r'\barticle\s+([0-9]+)\b', q_lower)
+            for a in m_art:
+                if int(a) > 22:
+                    return {
+                        "aligned": False,
+                        "ratio": 0.0,
+                        "reason": f"WIPO GRATK Treaty contains only Articles 1 through 22; Article {a} does not exist."
+                    }
+
         # 3. Extract stripped document names mentioned in query
         stripped_tokens = set()
         for pat, tokens in cls.KNOWN_DOC_PATTERNS:
@@ -219,6 +252,11 @@ class GuardrailsEngine:
             if term in evidence_text:
                 matched_terms.append(term)
                 continue
+            # Suffix/stem match (e.g. ratifications -> ratification, accessions -> accession)
+            stem = term[:-1] if term.endswith('s') and len(term) > 3 else term
+            if stem in evidence_text:
+                matched_terms.append(term)
+                continue
             # Synonym match
             syn_found = False
             for sgroup in cls.SYNONYM_GROUPS:
@@ -246,7 +284,7 @@ class GuardrailsEngine:
         compound_pairs = [
             ({'filing', 'file', 'filed'}, {'fee', 'fees'}),
             ({'commercialization', 'commercial'}, {'fee', 'fees'}),
-            ({'traditional'}, {'knowledge'}),
+            ({'traditional', 'indigenous', 'local'}, {'knowledge'}),
             ({'country'}, {'origin'}),
             ({'first'}, {'schedule'}),
             ({'rule'}, {'161'}),
@@ -283,26 +321,21 @@ class GuardrailsEngine:
         if target_sections:
             sec_found = False
             for sec in target_sections:
-                m_sub = re.match(r'^([0-9]+)[\(]?([a-z0-9]+)[\)]?$', sec)
+                m_sub = re.match(r'^([0-9]+)\s*[\(]([a-z0-9]+)[\)]$', sec) or re.match(r'^([0-9]+)([a-zA-Z])$', sec)
                 for c in candidates:
                     sec_clause = c.get("section_or_clause", "").lower()
                     text_lower = c.get("text", "").lower()
-                    if sec in sec_clause or sec in text_lower:
+                    if sec in sec_clause or f"section {sec}" in text_lower or f"rule {sec}" in text_lower or f"article {sec}" in text_lower:
                         sec_found = True
                         break
                     if m_sub:
                         s_num, s_clause = m_sub.groups()
                         clause_pat = f"({s_clause})"
-                        if clause_pat in text_lower or f"clause ({s_clause})" in text_lower or s_clause in sec_clause:
+                        has_clause = clause_pat in text_lower or f"clause ({s_clause})" in text_lower or s_clause in sec_clause
+                        has_sec = s_num in sec_clause or f"section {s_num}" in text_lower or f"{s_num}." in text_lower
+                        if has_clause and has_sec:
                             sec_found = True
                             break
-                if not sec_found and m_sub:
-                    s_num, s_clause = m_sub.groups()
-                    clause_pat = f"({s_clause})"
-                    has_clause = any(clause_pat in c.get("text", "").lower() or s_clause in c.get("section_or_clause", "").lower() for c in candidates)
-                    has_sec = any(s_num in c.get("section_or_clause", "").lower() or f"section {s_num}" in c.get("text", "").lower() or f"{s_num}." in c.get("text", "").lower() or c.get("document_name") == "Patents_Act_1970.PDF" for c in candidates)
-                    if has_clause and has_sec:
-                        sec_found = True
                 if sec_found:
                     break
             if not sec_found:
