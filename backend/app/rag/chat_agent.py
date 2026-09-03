@@ -4,7 +4,14 @@ from pydantic import BaseModel, Field
 
 from backend.app.rag.retriever import retriever
 from backend.app.rag.generator import GroundedLLMSynthesizer
-from backend.app.rag.schemas import GroundedClaim, CitationItem, EvidenceStrength, EvidenceRecord, ClaimRecord
+from backend.app.rag.schemas import (
+    GroundedClaim,
+    CitationItem,
+    EvidenceStrength,
+    EvidenceRecord,
+    ClaimRecord,
+    FormulationIntelligence
+)
 from backend.app.core.guardrails import GuardrailsEngine
 from backend.app.engines.triage_engine import (
     triage_engine,
@@ -12,6 +19,7 @@ from backend.app.engines.triage_engine import (
     TriageFormulationOutput,
     ProductCategoryEnum
 )
+from backend.app.engines.classifier_engine import classifier_engine
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +29,7 @@ class ChatAgentRequest(BaseModel):
     session_id: str = "default_session"
     classification_context: Optional[Dict[str, Any]] = None
     triage_input: Optional[TriageFormulationInput] = None
+    formulation_intelligence: Optional[FormulationIntelligence] = None
 
 class ChatAgentResponse(BaseModel):
     query: str
@@ -38,6 +47,7 @@ class ChatAgentResponse(BaseModel):
     citations: List[CitationItem] = []
     evidence_records: List[EvidenceRecord] = []
     triage_result: Optional[TriageFormulationOutput] = None
+    formulation_intelligence: Optional[FormulationIntelligence] = None
     escalation_available: bool = True
 
 class LegalChatAgent:
@@ -56,7 +66,13 @@ class LegalChatAgent:
         if session_id not in self.session_memory:
             self.session_memory[session_id] = []
 
-        # Step 1: Safety & Out-of-Scope Check on raw incoming query (Prevents history poisoning)
+        # Step 1: Formulation Intelligence & Intent Classification (Phase 4)
+        form_intel = classifier_engine.classify_query(
+            request.query,
+            jurisdiction=request.jurisdiction
+        )
+
+        # Step 1.5: Safety & Out-of-Scope Check on raw incoming query (Prevents history poisoning)
         safety_result = GuardrailsEngine.check_query_safety(request.query)
         if not safety_result["is_safe"]:
             out_of_scope_ans = f"⚠️ **Out of Scope Request**: {safety_result['reason']}\n\n💡 {safety_result['suggestion']}"
@@ -73,6 +89,7 @@ class LegalChatAgent:
                 partial_support=False,
                 claims=[],
                 citations=[],
+                formulation_intelligence=form_intel,
                 escalation_available=False
             )
 
@@ -120,7 +137,8 @@ class LegalChatAgent:
                 query=effective_query,
                 jurisdiction="comparative",
                 top_k=4,
-                enable_reranking=True
+                enable_reranking=True,
+                formulation_intelligence=form_intel
             )
             decomp = getattr(retriever, "last_decomposition", {})
             unsupported_dims = decomp.get("unsupported_dimensions", []) if decomp.get("is_decomposed") else []
@@ -141,7 +159,8 @@ class LegalChatAgent:
                 query=effective_query,
                 jurisdiction=effective_jur,
                 top_k=4,
-                enable_reranking=True
+                enable_reranking=True,
+                formulation_intelligence=form_intel
             )
             decomp = getattr(retriever, "last_decomposition", {})
             unsupported_dims = decomp.get("unsupported_dimensions", []) if decomp.get("is_decomposed") else []
@@ -192,6 +211,7 @@ class LegalChatAgent:
             citations=citations,
             evidence_records=evidence_records,
             triage_result=triage_output,
+            formulation_intelligence=form_intel,
             escalation_available=True
         )
 

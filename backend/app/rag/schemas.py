@@ -188,3 +188,118 @@ class LegalChunk(BaseModel):
             "official_source_url": self.metadata.official_source_url,
             "is_statutory_bar": self.metadata.is_statutory_bar,
         }
+
+# =========================================================================
+# PHASE 4: FORMULATION INTELLIGENCE & CLASSIFICATION SCHEMAS
+# =========================================================================
+
+class SubjectType(str, Enum):
+    """
+    Topical inquiry category identified from linguistic cues in the user query.
+    NOTE: Represents query focus for retrieval routing; does NOT establish statutory status.
+    """
+    CLASSICAL_FORMULATION = "classical_formulation"
+    PROPRIETARY_FORMULATION = "proprietary_formulation"
+    MODIFIED_FORMULATION = "modified_formulation"
+    UNSPECIFIED_FORMULATION = "unspecified_formulation"
+    SUBSTANCE_INGREDIENT = "substance_ingredient"
+    PROCESS_METHOD = "process_method"
+    REGULATORY_PRODUCT = "regulatory_product"
+    GENERAL_INQUIRY = "general_inquiry"
+    UNKNOWN = "unknown"
+
+class SubstanceOrigin(str, Enum):
+    BOTANICAL = "botanical"
+    ANIMAL_DERIVED = "animal_derived"
+    MINERAL_HERBO_MINERAL = "mineral_herbo_mineral"
+    MICROBIAL = "microbial"
+    SYNTHETIC_CHEMICAL = "synthetic_chemical"
+    UNKNOWN_MIXED = "unknown_mixed"
+
+class ProcessType(str, Enum):
+    KNOWN_TRADITIONAL_PROCESS = "known_traditional_process"
+    MODIFIED_PROCESS = "modified_process"
+    POTENTIALLY_NOVEL_PROCESS = "potentially_novel_process"
+    UNSPECIFIED_PROCESS = "unspecified_process"
+
+class TraditionalKnowledgeSignal(str, Enum):
+    EXPLICIT_TRADITIONAL = "explicit_traditional"
+    INFERRED_TRADITIONAL = "inferred_traditional"
+    UNCLEAR_OR_MIXED = "unclear_or_mixed"
+    NO_TK_SIGNAL = "no_tk_signal"
+
+class UserIntent(str, Enum):
+    PATENTABILITY_INQUIRY = "patentability_inquiry"
+    PRIOR_ART_TK_CONCERN = "prior_art_tk_concern"
+    REGULATORY_LICENSING = "regulatory_licensing"
+    BIODIVERSITY_ABS = "biodiversity_abs"
+    PROCEDURAL_FILING = "procedural_filing"
+    COMPARATIVE_CROSS_REGIME = "comparative_cross_regime"
+    GENERAL_INFORMATIONAL = "general_informational"
+    UNKNOWN = "unknown"
+
+class ConfidenceTier(str, Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    UNKNOWN = "UNKNOWN"
+
+class RoutingHints(BaseModel):
+    """
+    Downstream routing hints derived from linguistic signals in the query.
+    NOTE: These are retrieval hints to focus statutory evidence search, NOT legal conclusions.
+    """
+    retrieve_patent_exclusions: bool = False
+    retrieve_patentability_criteria: bool = False
+    retrieve_traditional_knowledge: bool = False
+    retrieve_biodiversity_abs: bool = False
+    retrieve_regulatory_licensing: bool = False
+    retrieve_food_safety_aahar: bool = False
+    retrieve_process_standards: bool = False
+    jurisdictions_suggested: List[str] = ["national"]
+    focus_terms: List[str] = []
+
+class FormulationIntelligence(BaseModel):
+    """
+    Structured, evidence-aware formulation and substance intelligence model.
+    Captures extracted query entities, linguistic signals, inquiry taxonomy,
+    explicit uncertainty, ambiguities, missing information, and retrieval routing hints.
+
+    CRITICAL ARCHITECTURAL INVARIANT:
+    This metadata represents query understanding to focus downstream evidence retrieval.
+    It NEVER constitutes statutory proof, evidentiary authority, or a legal conclusion
+    (e.g., patentability, exclusion under Section 3, or regulatory approval).
+    """
+    query_text: str
+    normalized_text: str
+    subject_type: SubjectType = SubjectType.UNKNOWN
+    subject_confidence: ConfidenceTier = ConfidenceTier.UNKNOWN
+    formulation_name: Optional[str] = None
+    alternative_names: List[str] = []
+    ingredients: List[str] = []
+    ingredient_count: int = 0
+    substance_origin: SubstanceOrigin = SubstanceOrigin.UNKNOWN_MIXED
+    dosage_form: Optional[str] = None
+    preparation_method: Optional[str] = None
+    process_type: ProcessType = ProcessType.UNSPECIFIED_PROCESS
+    novel_process_signal: bool = False
+    traditional_knowledge_signal: TraditionalKnowledgeSignal = TraditionalKnowledgeSignal.NO_TK_SIGNAL
+    user_intents: List[UserIntent] = []
+    plant_origin_signal: bool = False
+    animal_origin_signal: bool = False
+    mineral_origin_signal: bool = False
+    microbial_origin_signal: bool = False
+    synthetic_chemical_signal: bool = False
+    food_or_ayush_product_signal: bool = False
+    patent_inquiry_signal: bool = False
+    regulatory_inquiry_signal: bool = False
+    biodiversity_signal: bool = False
+    abs_signal: bool = False
+    jurisdictions_relevant: List[str] = []
+    classification_reasons: List[str] = []
+    ambiguities: List[str] = []
+    missing_information: List[str] = []
+    routing_hints: RoutingHints = Field(default_factory=RoutingHints)
+    overall_confidence: ConfidenceTier = ConfidenceTier.UNKNOWN
+    confidence_score: float = 0.0
+    classifier_version: str = "v1.0-deterministic"

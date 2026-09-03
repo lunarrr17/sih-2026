@@ -15,6 +15,8 @@ from backend.app.engines.triage_engine import (
     TriageFormulationInput,
     TriageFormulationOutput
 )
+from backend.app.engines.classifier_engine import classifier_engine
+from backend.app.rag.schemas import FormulationIntelligence
 
 # Initialize colorful structured logging
 setup_logging()
@@ -84,6 +86,21 @@ async def evaluate_triage(input_data: TriageFormulationInput):
         return result
     except Exception as e:
         logger.error(f"Error in triage evaluation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ClassifyRequest(BaseModel):
+    query: str
+    jurisdiction: str = "national"
+
+@app.post("/api/classify", response_model=FormulationIntelligence)
+async def classify_endpoint(req: ClassifyRequest):
+    """Formulation Intelligence and Classification endpoint (Phase 4)."""
+    try:
+        logger.info(f"🧪 Classifying query: '{req.query}' [Jurisdiction: {req.jurisdiction.upper()}]")
+        result = classifier_engine.classify_query(req.query, jurisdiction=req.jurisdiction)
+        return result
+    except Exception as e:
+        logger.error(f"Error in query classification: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/export/dossier")

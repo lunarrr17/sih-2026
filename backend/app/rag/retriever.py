@@ -219,14 +219,23 @@ class HybridRetriever:
 
         return candidates
 
-    def decompose_query(self, query: str, jurisdiction: str = "national") -> List[Dict[str, str]]:
+    def decompose_query(
+        self,
+        query: str,
+        jurisdiction: str = "national",
+        formulation_intelligence: Optional[Any] = None
+    ) -> List[Dict[str, str]]:
         """
         Conservative multi-concept query decomposer.
         Detects queries requiring multi-hop evidence across distinct statutory domains.
+        Optionally consumes FormulationIntelligence routing hints to guide retrieval.
         Returns sub-queries for independent retrieval.
         """
         q_lower = query.lower()
         dimensions = []
+
+        # Consume FormulationIntelligence routing hints if available
+        routing = getattr(formulation_intelligence, "routing_hints", None)
 
         # 1. Patent application official fees
         fee_cues = ["fee", "fees", "cost", "filing fee", "patent fee", "fees for patent", "how much does a patent cost", "inr fee", "fee schedule"]
@@ -499,7 +508,8 @@ class HybridRetriever:
         query: str,
         jurisdiction: str = "national",
         top_k: int = 5,
-        enable_reranking: bool = True
+        enable_reranking: bool = True,
+        formulation_intelligence: Optional[Any] = None
     ) -> Any:
         """
         Executes hybrid search + cross-encoder reranking + evidence relevance gating.
@@ -567,7 +577,7 @@ class HybridRetriever:
 
         # Check if concept-tailored query decomposition applies (National jurisdiction only)
         if effective_jur == "national":
-            decomposed = self.decompose_query(query, jurisdiction=effective_jur)
+            decomposed = self.decompose_query(query, jurisdiction=effective_jur, formulation_intelligence=formulation_intelligence)
             if decomposed:
                 per_dim_k = max(2, top_k // len(decomposed)) if len(decomposed) > 1 else top_k
                 logger.info(f"🔀 Concept-tailored query detected ({len(decomposed)} dimensions). Executing sub-retrievals...")
