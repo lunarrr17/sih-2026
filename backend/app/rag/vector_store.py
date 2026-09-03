@@ -304,16 +304,18 @@ class QdrantHybridVectorStore:
     def hybrid_search(self, query: str, jurisdiction: str = "national", top_k: int = 8, rrf_k: int = 60) -> List[Dict[str, Any]]:
         """
         Combines Dense and Sparse search results using Reciprocal Rank Fusion (RRF).
-        RRF_Score = sum(1 / (rrf_k + rank))
+        Preserves individual retriever ranks and scores for full explainability.
+        RRF_Score = sum(weight / (rrf_k + rank))
         """
-        dense_results = self.dense_search(query, jurisdiction=jurisdiction, top_k=top_k * 2)
-        sparse_results = self.sparse_search(query, jurisdiction=jurisdiction, top_k=top_k * 2)
+        dense_results = self.dense_search(query, jurisdiction=jurisdiction, top_k=top_k * 3)
+        sparse_results = self.sparse_search(query, jurisdiction=jurisdiction, top_k=top_k * 3)
 
         rrf_scores: Dict[str, float] = Counter()
         doc_map: Dict[str, Dict[str, Any]] = {}
 
         for rank, doc in enumerate(dense_results, start=1):
             doc_id = doc["chunk_id"]
+            doc["dense_rank"] = rank
             doc_map[doc_id] = doc
             rrf_scores[doc_id] += 1.0 / (rrf_k + rank)
 
@@ -321,33 +323,62 @@ class QdrantHybridVectorStore:
             doc_id = doc["chunk_id"]
             if doc_id not in doc_map:
                 doc_map[doc_id] = doc
+            else:
+                doc_map[doc_id]["sparse_score"] = doc.get("sparse_score")
+                doc_map[doc_id]["raw_bm25_score"] = doc.get("raw_bm25_score")
+            doc_map[doc_id]["sparse_rank"] = rank
             # Exact BM25 matches receive high RRF weighting
             rrf_scores[doc_id] += 3.0 / (rrf_k + rank)
 
         sorted_doc_ids = sorted(rrf_scores.keys(), key=lambda k: rrf_scores[k], reverse=True)
 
-        # Enforce statutory diversity: do not let secondary studies monopolize the candidate pool!
+        for fused_rank, doc_id in enumerate(sorted_doc_ids, start=1):
+            doc = doc_map[doc_id]
+            doc["fused_rank"] = fused_rank
+            doc["fused_score"] = round(rrf_scores[doc_id], 4)
+            doc["hybrid_rrf_score"] = round(rrf_scores[doc_id], 4)
+            if "authority_level" not in doc:
+                doc["authority_level"] = "secondary_academic_study" if "Traditional_Knowledge_Guidelines" in doc.get("document_name", "") else "primary_statute"
+
+        # Deduplication & statutory diversity:
+        # 1. Drop near-identical text duplicates from the same provision/section of the same document
+        # 2. Preserve distinct legal provisions even if they share boilerplate opening phrases
+        # 3. Enforce statutory diversity: cap secondary commentary at 2, but allow primary statutes up to top_k (relevance > diversity)
         final_results = []
+        seen_text_prefixes = set()
         doc_counts: Dict[str, int] = Counter()
-        max_per_doc = max(2, top_k // 3)
 
         for doc_id in sorted_doc_ids:
             doc = doc_map[doc_id]
             d_name = doc.get("document_name", "")
-            doc_cap = 2 if "Traditional_Knowledge_Guidelines" in d_name else max_per_doc
+            raw_text = doc.get("text", "")
+            sec_clause = str(doc.get("section_or_clause", "")).strip().lower()
+            # Near-identical text dedup prefix incorporates section/clause so distinct legal provisions survive
+            clean_snippet = re.sub(r'\W+', '', raw_text.lower())[:100]
+            text_prefix = f"{d_name}:{sec_clause}:{clean_snippet}"
+            if text_prefix in seen_text_prefixes:
+                continue
+
+            # Secondary academic commentary is capped at 2; primary statutory enactments are allowed up to top_k
+            doc_cap = 2 if "Traditional_Knowledge_Guidelines" in d_name else top_k
             if doc_counts[d_name] < doc_cap:
-                doc["hybrid_rrf_score"] = round(rrf_scores[doc_id], 4)
+                seen_text_prefixes.add(text_prefix)
                 final_results.append(doc)
                 doc_counts[d_name] += 1
                 if len(final_results) >= top_k:
                     break
 
-        # Secondary pass: if slots remain, fill with highest remaining
+        # Secondary pass: if slots remain, fill with highest remaining unique passages
         if len(final_results) < top_k:
             for doc_id in sorted_doc_ids:
                 doc = doc_map[doc_id]
-                if doc not in final_results:
-                    doc["hybrid_rrf_score"] = round(rrf_scores[doc_id], 4)
+                d_name = doc.get("document_name", "")
+                raw_text = doc.get("text", "")
+                sec_clause = str(doc.get("section_or_clause", "")).strip().lower()
+                clean_snippet = re.sub(r'\W+', '', raw_text.lower())[:100]
+                text_prefix = f"{d_name}:{sec_clause}:{clean_snippet}"
+                if text_prefix not in seen_text_prefixes and doc not in final_results:
+                    seen_text_prefixes.add(text_prefix)
                     final_results.append(doc)
                     if len(final_results) >= top_k:
                         break

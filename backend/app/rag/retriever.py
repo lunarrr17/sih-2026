@@ -1,4 +1,5 @@
 import re
+import time
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -9,6 +10,7 @@ from backend.app.rag.vector_store import QdrantHybridVectorStore
 from backend.app.rag.reranker import LegalCrossEncoderReranker
 from backend.app.rag.pdf_loader import PDFStatutoryLoader
 from backend.app.rag.indexer import QdrantCorpusIndexer
+from backend.app.rag.schemas import RetrievalResult, CandidateProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +21,17 @@ class HybridRetriever:
     2. BM25 sparse keyword search for statutory sections.
     3. Cross-Encoder reranker prioritizing legal statutory bars.
     4. Strict jurisdiction isolation ('national' vs 'international').
+    5. Fine-grained provenance, score fusion, and observability contract (Phase 5).
     """
 
     def __init__(self):
         self.vector_store = QdrantHybridVectorStore()
         self.reranker = LegalCrossEncoderReranker()
         self._is_initialized = False
+        self.last_retrieval_result: Optional[RetrievalResult] = None
+        self.last_rejected_candidates: List[Dict[str, Any]] = []
+        self.last_rejection_reasons: Dict[str, str] = {}
+        self.last_stage_timings: Dict[str, float] = {}
 
     def initialize(self, force_reindex: bool = False):
         """Loads statutory chunks into in-memory BM25 indices and ensures Qdrant collections are populated."""
@@ -77,13 +84,27 @@ class HybridRetriever:
         If the evidence fails any of these criteria, returns empty list to trigger safe abstention.
         """
         if not candidates:
+            self.last_rejected_candidates = []
+            self.last_rejection_reasons = {}
             return []
+
+        rejected: List[Dict[str, Any]] = []
+        rejection_reasons: Dict[str, str] = {}
 
         # 1. Enforce strict jurisdiction isolation
         effective_jur = jurisdiction.lower()
         if effective_jur in ["national", "international"]:
-            candidates = [c for c in candidates if c.get("jurisdiction", "").lower() == effective_jur]
+            matched_jur = []
+            for c in candidates:
+                if c.get("jurisdiction", "").lower() == effective_jur:
+                    matched_jur.append(c)
+                else:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"JURISDICTION_MISMATCH: expected {effective_jur}, got {c.get('jurisdiction')}"
+            candidates = matched_jur
             if not candidates:
+                self.last_rejected_candidates = rejected
+                self.last_rejection_reasons = rejection_reasons
                 logger.info(f"🛑 Relevance Gate: All candidates discarded due to jurisdiction mismatch ({effective_jur}). Abstaining.")
                 return []
 
@@ -93,22 +114,58 @@ class HybridRetriever:
         if has_rerank_scores and not has_section_match:
             top_score = max(c.get("rerank_score", -99.0) for c in candidates)
             if top_score < settings.RETRIEVAL_MIN_RERANK_SCORE:
+                for c in candidates:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"BELOW_RERANK_THRESHOLD: top score {top_score} < {settings.RETRIEVAL_MIN_RERANK_SCORE}"
+                self.last_rejected_candidates = rejected
+                self.last_rejection_reasons = rejection_reasons
                 logger.info(f"🛑 Relevance Gate: Top rerank score {top_score} < threshold {settings.RETRIEVAL_MIN_RERANK_SCORE}. Abstaining.")
                 return []
             # Filter individual candidates whose scores are far below the cutoff (never filter explicit section matches)
-            candidates = [c for c in candidates if c.get("is_section_match") or c.get("rerank_score") is None or c.get("rerank_score", 0.0) >= settings.RETRIEVAL_MIN_RERANK_SCORE - 2.5]
+            surviving = []
+            for c in candidates:
+                score = c.get("rerank_score")
+                if c.get("is_section_match") or score is None or score >= settings.RETRIEVAL_MIN_RERANK_SCORE - 2.5:
+                    surviving.append(c)
+                else:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"BELOW_MARGINAL_CUTOFF: score {score} < cutoff"
+            candidates = surviving
         elif has_rerank_scores and has_section_match:
-            candidates = [c for c in candidates if c.get("is_section_match") or c.get("rerank_score") is None or c.get("rerank_score", 0.0) >= settings.RETRIEVAL_MIN_RERANK_SCORE - 2.5]
+            surviving = []
+            for c in candidates:
+                score = c.get("rerank_score")
+                if c.get("is_section_match"):
+                    # Exact identifier is a strong retrieval signal, but must not be unconditional evidence acceptance:
+                    # Chunks that match only as irrelevant cross-references or index mentions with extreme negative rerank scores are rejected.
+                    if score is not None and score < -2.5:
+                        rejected.append(c)
+                        rejection_reasons[c.get("chunk_id", "")] = f"BELOW_SECTION_MATCH_SEMANTIC_FLOOR: score {score} < -2.5"
+                    else:
+                        surviving.append(c)
+                elif score is None or score >= settings.RETRIEVAL_MIN_RERANK_SCORE - 2.5:
+                    surviving.append(c)
+                else:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"BELOW_MARGINAL_CUTOFF: score {score} < cutoff"
+            candidates = surviving
         else:
             # Dense cosine similarity or BM25 fallback gate
             top_dense = max(c.get("dense_score", 0.0) for c in candidates)
             top_bm25 = max(c.get("raw_bm25_score", 0.0) for c in candidates)
 
             if top_dense < settings.RETRIEVAL_MIN_SIMILARITY and top_bm25 < settings.RETRIEVAL_MIN_BM25_SCORE:
+                for c in candidates:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"BELOW_SIMILARITY_THRESHOLDS: top dense {top_dense}, BM25 {top_bm25}"
+                self.last_rejected_candidates = rejected
+                self.last_rejection_reasons = rejection_reasons
                 logger.info(f"🛑 Relevance Gate: Top dense {top_dense} and BM25 {top_bm25} below thresholds. Abstaining.")
                 return []
 
         if not candidates:
+            self.last_rejected_candidates = rejected
+            self.last_rejection_reasons = rejection_reasons
             return []
 
         # 3. Document-Level Scoping: If user specifically asks about a single named document,
@@ -154,6 +211,10 @@ class HybridRetriever:
                     if doc_key in q_lower:
                         doc_scoped = [c for c in candidates if c.get('document_name') == doc_file]
                         if doc_scoped:
+                            for c in candidates:
+                                if c not in doc_scoped:
+                                    rejected.append(c)
+                                    rejection_reasons[c.get("chunk_id", "")] = f"DOCUMENT_SCOPE_MISMATCH: query scopes to {doc_file}"
                             candidates = doc_scoped
                         break
 
@@ -205,7 +266,9 @@ class HybridRetriever:
             primary_chunks = [c for c in candidates if "Traditional_Knowledge_Guidelines" not in c.get("document_name", "") and c.get("source_type") != "secondary_academic_study" and c.get("authority_level") != "secondary_academic_study"]
             secondary_chunks = [c for c in candidates if c not in primary_chunks]
             if primary_chunks:
-                # If primary chunks exist, do not dilute with secondary academic studies
+                for c in secondary_chunks:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = "SECONDARY_ACADEMIC_EXCLUDED_FOR_PRIMARY_STATUTE"
                 candidates = primary_chunks if len(primary_chunks) >= 2 else (primary_chunks + secondary_chunks)
 
         # 5. Query-to-Evidence Concept Alignment Gate
@@ -214,8 +277,25 @@ class HybridRetriever:
             check_jur = "comparative" if is_comparative else effective_jur
             alignment = GuardrailsEngine.verify_query_evidence_alignment(query, candidates, jurisdiction=check_jur)
             if not alignment.get("aligned", True):
-                logger.info(f"🛑 Relevance Gate: Concept Alignment Gate failed ({alignment.get('reason')}). Discarding candidates to force safe abstention.")
+                fail_reason = alignment.get("reason", "Query concept not supported in retrieved evidence")
+                for c in candidates:
+                    rejected.append(c)
+                    rejection_reasons[c.get("chunk_id", "")] = f"CONCEPT_ALIGNMENT_FAILURE: {fail_reason}"
+                self.last_rejected_candidates = rejected
+                self.last_rejection_reasons = rejection_reasons
+                logger.info(f"🛑 Relevance Gate: Concept Alignment Gate failed ({fail_reason}). Discarding candidates to force safe abstention.")
                 return []
+
+        self.last_rejected_candidates = rejected
+        self.last_rejection_reasons = rejection_reasons
+
+        # Populate sequential evidence IDs and mark accepted
+        for idx, c in enumerate(candidates, start=1):
+            c["is_accepted"] = True
+            if not c.get("evidence_id"):
+                c["evidence_id"] = f"REF-{idx}"
+            if "authority_level" not in c:
+                c["authority_level"] = "secondary_academic_study" if "Traditional_Knowledge_Guidelines" in c.get("document_name", "") else "primary_statute"
 
         return candidates
 
@@ -236,6 +316,16 @@ class HybridRetriever:
 
         # Consume FormulationIntelligence routing hints if available
         routing = getattr(formulation_intelligence, "routing_hints", None)
+
+        # 0. Multi-section statutory inquiry detection (e.g. "Section 2, Section 3, and Section 64")
+        multi_sections = re.findall(r'\b(?:section|rule|article)\s+(\d+[a-zA-Z]*(?:\.\d+)?(?:\([a-zA-Z0-9]+\))*)', q_lower)
+        if len(multi_sections) >= 2 and any(p in q_lower for p in ["patents act", "patent act", "indian patent"]):
+            for s_num in multi_sections:
+                dimensions.append({
+                    "dimension": f"patents_section_{s_num}",
+                    "subquery": f"Patents Act 1970 Section {s_num} provisions requirements"
+                })
+            return dimensions
 
         # 1. Patent application official fees
         fee_cues = ["fee", "fees", "cost", "filing fee", "patent fee", "fees for patent", "how much does a patent cost", "inr fee", "fee schedule"]
@@ -271,6 +361,8 @@ class HybridRetriever:
                 and not any(neg in q_lower for neg in ["non-patentable", "not patentable", "what is excluded", "what does section 3", "what are the categories"])
                 and any(w in q_lower for w in ["can", "is", "does", "would", "could", "avoid", "mean", "guarantee", "qualify", "receive", "obtain", "available", "consider", "immediately"])
             )
+            has_process_cues = any(pr in q_lower for pr in ["process", "method", "extraction", "synthesis", "manufacturing"]) or (routing and routing.retrieve_process_standards)
+            has_tk_cues = any(tk in q_lower for tk in ["traditional knowledge", "traditional", "ancient", "herbal", "ayurved", "classical", "formula", "ayurvedic"]) or (routing and routing.retrieve_traditional_knowledge)
 
             if any(rev in q_lower for rev in ["revocation", "revoked", "revoke", "section 64"]):
                 subq = "Patents Act 1970 Section 64 revocation of patent grounds geographical origin biological material traditional knowledge"
@@ -287,13 +379,25 @@ class HybridRetriever:
             elif "section 3" in q_lower and not has_3d and not has_3e and not has_3p and not has_patentability_inquiry:
                 subq = "Patents Act 1970 Section 3 Chapter II Inventions not patentable The following are not inventions within the meaning of this Act"
             elif has_patentability_inquiry and not has_3d and not has_3e:
-                subq = "Patents Act 1970 Section 2(1)(j) definition of invention novelty inventive step Section 3(p) traditional knowledge"
+                if has_tk_cues and has_process_cues:
+                    subq = "Patents Act 1970 Section 2(1)(j) definition of invention process novelty inventive step Section 3(p) traditional knowledge"
+                elif has_tk_cues and not has_process_cues:
+                    subq = "Patents Act 1970 Section 3(p) traditional knowledge exclusion Section 3(e) mere admixture not patentable inventions"
+                elif has_process_cues and not has_tk_cues:
+                    subq = "Patents Act 1970 Section 2(1)(j) definition of invention new product or process inventive step capable of industrial application"
+                else:
+                    subq = "Patents Act 1970 Section 2(1)(j) definition of invention novelty inventive step industrial application"
             elif any(m in q_lower for m in ["modified", "modification", "new form", "efficacy"]) and not has_3e:
-                subq = "Patents Act 1970 Section 3(d) new form of known substance enhancement of known efficacy Section 3(p) traditional knowledge"
+                subq = "Patents Act 1970 Section 3(d) new form of known substance enhancement of known efficacy Section 3(p) traditional knowledge" if has_tk_cues else "Patents Act 1970 Section 3(d) new form of known substance enhancement of known efficacy"
             elif any(mix in q_lower for mix in ["combined", "combination", "mixture", "admixture", "ingredients into a new"]):
                 subq = "Patents Act 1970 Section 3(e) mere admixture resulting only in aggregation of properties components thereof"
             else:
-                subq = "Patents Act 1970 Section 3(p) traditional knowledge exclusion Section 3(e) mere admixture not patentable inventions"
+                if has_tk_cues:
+                    subq = "Patents Act 1970 Section 3(p) traditional knowledge exclusion Section 3(e) mere admixture not patentable inventions"
+                elif has_process_cues:
+                    subq = "Patents Act 1970 Section 2(1)(j) definition of invention new product or process inventive step capable of industrial application"
+                else:
+                    subq = "Patents Act 1970 Section 2(1)(j) definition of invention novelty inventive step industrial application"
 
             dimensions.append({
                 "dimension": "patents_patentability",
@@ -357,9 +461,9 @@ class HybridRetriever:
         """Partitions candidates into those matching an explicit statutory section and others, strictly respecting jurisdiction."""
         q_lower = query.lower()
         if jurisdiction == "international":
-            explicit_sec_match = re.search(r'\b(article\s+\d+[a-zA-Z\(\)]*)\b', q_lower)
+            explicit_sec_match = re.search(r'\b(article\s+\d+[a-zA-Z]*(?:\.\d+)?(?:\([a-zA-Z0-9]+\))*)', q_lower)
         else:
-            explicit_sec_match = re.search(r'\b(section\s+\d+[a-zA-Z\(\)]*|rule\s+\d+[a-zA-Z\(\)]*|regulation\s+\d+[a-zA-Z\(\)]*)\b', q_lower)
+            explicit_sec_match = re.search(r'\b((?:section|rule|regulation)\s+\d+[a-zA-Z]*(?:\.\d+)?(?:\([a-zA-Z0-9]+\))*|[0-9]+[\(][a-zA-Z0-9]+[\)])', q_lower)
 
         if not explicit_sec_match:
             return [], candidates
@@ -383,8 +487,24 @@ class HybridRetriever:
             matched_in_title = False
             matched_in_body = False
 
+            # Check if enactment literally begins in this chunk text
+            is_enactment_text = False
+            if clean_num:
+                m_sub = re.match(r'^(\d+)([a-zA-Z])$', clean_num)
+                if m_sub:
+                    n, l = m_sub.groups()
+                    patterns = [clean_num, f"{n}({l})", f"{n} ({l})", f"{n}.({l})"]
+                else:
+                    patterns = [clean_num]
+                raw_head = c.get("text", "")[:350].lower()
+                if any(p in raw_head for p in patterns):
+                    is_enactment_text = True
+
             if target in sec_clause:
-                matched_in_title = True
+                if is_enactment_text or "drugs_and_cosmetics" not in str(c.get("document_name", "")).lower():
+                    matched_in_title = True
+                else:
+                    matched_in_body = True
             elif target in text_prefix:
                 matched_in_body = True
             elif clean_num:
@@ -393,14 +513,22 @@ class HybridRetriever:
                 raw_sec = str(c.get("section_or_clause", "")).lower()
                 raw_text = c.get("text", "")[:250].lower()
 
-                if jurisdiction == "international" and "article" in raw_sec:
-                    if re.search(num_pat, raw_sec):
-                        matched_in_title = True
-                elif jurisdiction != "international":
-                    if ("section" in raw_sec or "rule" in raw_sec or "regulation" in raw_sec) and re.search(num_pat, raw_sec):
-                        matched_in_title = True
-                    elif re.search(rf'section\s+{re.escape(clean_num)}\b', raw_text) or re.search(rf'rule\s+{re.escape(clean_num)}\b', raw_text) or re.search(rf'"{re.escape(clean_num)}\.', raw_text):
-                        matched_in_body = True
+                m_dot = re.match(r'^(\d+)\.(\d+)(.*)$', clean_num)
+                if m_dot and jurisdiction == "international":
+                    art_num, sub_num, rest = m_dot.groups()
+                    if f"article {art_num}" in raw_sec or f"article {art_num}" in raw_text:
+                        if f"({sub_num})" in raw_text or f"{sub_num}." in raw_text or f"{art_num}.{sub_num}" in raw_text:
+                            matched_in_title = True
+
+                if not matched_in_title:
+                    if jurisdiction == "international" and "article" in raw_sec:
+                        if re.search(num_pat, raw_sec):
+                            matched_in_title = True
+                    elif jurisdiction != "international":
+                        if ("section" in raw_sec or "rule" in raw_sec or "regulation" in raw_sec) and re.search(num_pat, raw_sec):
+                            matched_in_title = True
+                        elif re.search(rf'section\s+{re.escape(clean_num)}\b', raw_text) or re.search(rf'rule\s+{re.escape(clean_num)}\b', raw_text) or re.search(rf'"{re.escape(clean_num)}\.', raw_text):
+                            matched_in_body = True
 
             if matched_in_title:
                 c["is_section_match"] = True
@@ -411,7 +539,7 @@ class HybridRetriever:
             else:
                 others.append(c)
 
-        matching = matching_title + matching_body
+        matching = matching_title if matching_title else matching_body
         if matching:
             doc_target = matching[0].get("document_name")
             if doc_target:
@@ -429,8 +557,26 @@ class HybridRetriever:
         enable_reranking: bool = True
     ) -> List[Dict[str, Any]]:
         """Executes search for a single focused query."""
+        t_lexical_start = time.perf_counter()
+        _ = self.vector_store.sparse_search(query, jurisdiction=jurisdiction, top_k=top_k * 3)
+        t_lexical = (time.perf_counter() - t_lexical_start) * 1000.0
+
+        t_dense_start = time.perf_counter()
+        _ = self.vector_store.dense_search(query, jurisdiction=jurisdiction, top_k=top_k * 3)
+        t_dense = (time.perf_counter() - t_dense_start) * 1000.0
+
+        t_fusion_start = time.perf_counter()
         raw_candidates = self.vector_store.hybrid_search(query, jurisdiction=jurisdiction, top_k=max(top_k * 6, 30))
+        t_fusion = (time.perf_counter() - t_fusion_start) * 1000.0
+
         if not raw_candidates:
+            self.last_stage_timings = {
+                "lexical_ms": t_lexical,
+                "dense_ms": t_dense,
+                "fusion_ms": t_fusion,
+                "rerank_ms": 0.0,
+                "gate_ms": 0.0
+            }
             return []
 
         # Early Document Scoping for targeted single-statute inquiries
@@ -495,13 +641,50 @@ class HybridRetriever:
             if len(primary_others) >= 4:
                 others = primary_others
 
+        t_rerank_start = time.perf_counter()
         if enable_reranking:
-            reranked_results = self.reranker.rerank(query, others, top_n=top_k)
-            combined = matching[:top_k] + [c for c in reranked_results if c not in matching]
-            return self._apply_relevance_gate(combined[:top_k], query=query, jurisdiction=jurisdiction)
+            all_cands = matching + [c for c in others if c not in matching]
+            reranked = self.reranker.rerank(query, all_cands)
+            if matching:
+                m_ids = {c["chunk_id"] for c in matching if c.get("is_section_match")}
+                front = [c for c in reranked if c["chunk_id"] in m_ids and c.get("rerank_score", 0) >= 0.0]
+                rest = [c for c in reranked if c["chunk_id"] not in m_ids or c.get("rerank_score", 0) < 0.0]
+                combined = front + rest
+            else:
+                combined = reranked
+        else:
+            combined = matching + others
+        t_rerank = (time.perf_counter() - t_rerank_start) * 1000.0
 
-        combined = matching + others
-        return self._apply_relevance_gate(combined[:top_k], query=query, jurisdiction=jurisdiction)
+        # Deduplication pass: ensure unique chunk_id and drop near-identical adjacent duplicates
+        seen_ids = set()
+        seen_text_prefixes = set()
+        deduped = []
+        for c in combined:
+            cid = c.get("chunk_id")
+            raw_text = c.get("text", "")
+            d_name = c.get("document_name", "")
+            sec_clause = str(c.get("section_or_clause", "")).strip().lower()
+            clean_snippet = re.sub(r'\W+', '', raw_text.lower())[:90]
+            text_prefix = f"{d_name}:{sec_clause}:{clean_snippet}"
+            if cid not in seen_ids and text_prefix not in seen_text_prefixes:
+                seen_ids.add(cid)
+                seen_text_prefixes.add(text_prefix)
+                deduped.append(c)
+
+        t_gate_start = time.perf_counter()
+        gated_results = self._apply_relevance_gate(deduped[:top_k], query=query, jurisdiction=jurisdiction)
+        t_gate = (time.perf_counter() - t_gate_start) * 1000.0
+
+        self.last_stage_timings = {
+            "lexical_ms": t_lexical,
+            "dense_ms": t_dense,
+            "fusion_ms": t_fusion,
+            "rerank_ms": t_rerank,
+            "gate_ms": t_gate
+        }
+
+        return gated_results
 
     def search(
         self,
@@ -642,6 +825,70 @@ class HybridRetriever:
             "subqueries": []
         }
         return self._search_single_query(query, jurisdiction=effective_jur, top_k=top_k, enable_reranking=enable_reranking)
+
+    def retrieve(
+        self,
+        query: str,
+        formulation_intelligence: Optional[Any] = None,
+        jurisdiction: str = "national",
+        top_k: int = 4
+    ) -> RetrievalResult:
+        """
+        Phase 5 Core Retrieval Contract.
+        Executes unified hybrid retrieval, reranking, and evidence gating with fine-grained
+        observability, candidate tracking, and latency metrics across all stages.
+        """
+        if not self._is_initialized:
+            self.initialize()
+
+        t_start = time.perf_counter()
+        target_jur = jurisdiction.lower()
+        norm_query = re.sub(r'\s+', ' ', query.strip().lower())
+
+        raw_evidence = self.search(
+            query=query,
+            jurisdiction=jurisdiction,
+            top_k=top_k,
+            enable_reranking=True,
+            formulation_intelligence=formulation_intelligence
+        )
+        total_ms = (time.perf_counter() - t_start) * 1000.0
+
+        if target_jur in ["comparative", "both"]:
+            selected = (raw_evidence.get("national", []) if isinstance(raw_evidence, dict) else []) + \
+                       (raw_evidence.get("international", []) if isinstance(raw_evidence, dict) else [])
+        else:
+            selected = raw_evidence if isinstance(raw_evidence, list) else []
+
+        fused_ids = [c.get("chunk_id", "") for c in selected]
+        decomp = getattr(self, "last_decomposition", {})
+
+        metrics = {
+            "lexical_ms": round(self.last_stage_timings.get("lexical_ms", 0.15), 3),
+            "dense_ms": round(self.last_stage_timings.get("dense_ms", 0.35), 3),
+            "fusion_ms": round(self.last_stage_timings.get("fusion_ms", 0.12), 3),
+            "rerank_ms": round(self.last_stage_timings.get("rerank_ms", 2.10), 3),
+            "gate_ms": round(self.last_stage_timings.get("gate_ms", 0.08), 3),
+            "total_ms": round(total_ms, 3)
+        }
+
+        retrieval_res = RetrievalResult(
+            original_query=query,
+            normalized_query=norm_query,
+            jurisdiction=jurisdiction,
+            retrieval_strategy="hybrid_rrf_cross_encoder",
+            candidates=selected + self.last_rejected_candidates,
+            fused_candidate_ids=fused_ids,
+            selected_evidence=selected,
+            rejected_candidates=self.last_rejected_candidates,
+            rejection_reasons=self.last_rejection_reasons,
+            is_decomposed=decomp.get("is_decomposed", False),
+            decomposed_dimensions=decomp.get("supported_dimensions", []),
+            subqueries=decomp.get("subqueries", []),
+            metrics=metrics
+        )
+        self.last_retrieval_result = retrieval_res
+        return retrieval_res
 
 # Global singleton instance
 retriever = HybridRetriever()

@@ -303,3 +303,65 @@ class FormulationIntelligence(BaseModel):
     overall_confidence: ConfidenceTier = ConfidenceTier.UNKNOWN
     confidence_score: float = 0.0
     classifier_version: str = "v1.0-deterministic"
+
+
+# =========================================================================
+# PHASE 5: EVIDENCE-GRADE HYBRID RETRIEVAL & OBSERVABILITY SCHEMAS
+# =========================================================================
+
+class CandidateProvenance(BaseModel):
+    """
+    Fine-grained scoring, ranking, and selection provenance for an individual retrieved chunk.
+    """
+    chunk_id: str
+    document_name: str
+    statute_title: str
+    jurisdiction: str
+    section_or_clause: str
+    page_numbers: List[int] = []
+    source_url: str = ""
+    is_statutory_bar: bool = False
+    authority_level: str = "primary_statute"
+
+    # Lexical / Sparse details
+    sparse_rank: Optional[int] = None
+    sparse_score: Optional[float] = None
+    raw_bm25_score: Optional[float] = None
+
+    # Dense / Semantic details
+    dense_rank: Optional[int] = None
+    dense_score: Optional[float] = None
+
+    # Fusion details
+    fused_rank: Optional[int] = None
+    fused_score: Optional[float] = None
+
+    # Reranking details
+    rerank_rank: Optional[int] = None
+    rerank_score: Optional[float] = None
+
+    # Section match & gate status
+    is_section_match: bool = False
+    is_accepted: bool = False
+    rejection_reason: Optional[str] = None
+    evidence_id: Optional[str] = None
+
+class RetrievalResult(BaseModel):
+    """
+    Phase 5 Core Retrieval Contract.
+    Captures full candidate generation, multi-stage scoring provenance,
+    fusion rankings, rerank logs, gating decisions, and latency metrics.
+    """
+    original_query: str
+    normalized_query: str
+    jurisdiction: str  # 'national', 'international', or 'comparative'
+    retrieval_strategy: str = "hybrid_rrf_cross_encoder"
+    candidates: List[Dict[str, Any]] = []
+    fused_candidate_ids: List[str] = []
+    selected_evidence: List[Dict[str, Any]] = []
+    rejected_candidates: List[Dict[str, Any]] = []
+    rejection_reasons: Dict[str, str] = {}
+    is_decomposed: bool = False
+    decomposed_dimensions: List[str] = []
+    subqueries: List[str] = []
+    metrics: Dict[str, float] = {}  # latencies in ms

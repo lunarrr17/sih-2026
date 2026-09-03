@@ -26,7 +26,7 @@ class LegalCrossEncoderReranker:
                 logger.warning(f"Could not load cross-encoder ({e}). Using heuristic reranker.")
                 self._model = None
 
-    def rerank(self, query: str, candidates: List[Dict[str, Any]], top_n: int = 4) -> List[Dict[str, Any]]:
+    def rerank(self, query: str, candidates: List[Dict[str, Any]], top_n: Optional[int] = None) -> List[Dict[str, Any]]:
         """Reranks candidate statutory chunks and returns top_n items sorted by score."""
         if not candidates:
             return []
@@ -60,6 +60,8 @@ class LegalCrossEncoderReranker:
             final_score = item["neural_rerank_score"]
             item["rerank_score"] = round(float(final_score), 4)
 
-        # Step 3: Sort in descending order
+        # Step 3: Sort in descending order and attach rerank_rank
         scored_candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
-        return scored_candidates[:top_n]
+        for rank, item in enumerate(scored_candidates, start=1):
+            item["rerank_rank"] = rank
+        return scored_candidates if top_n is None else scored_candidates[:top_n]

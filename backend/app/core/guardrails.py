@@ -90,7 +90,7 @@ class GuardrailsEngine:
         'set', 'out', 'laid', 'down', 'satisfied', 'satisfy', 'take', 'effect', 'internationally', 'enterprise', 'develop',
         'develops', 'developed', 'active', 'fractions', 'contrast', 'detail', 'details', 'elaborate', 'deal', 'deals',
         'summation', 'techniques', 'technique', 'isolated', 'isolate', 'isolating', 'condition', 'conditions', 'legal',
-        'threshold', 'globally', 'required', 'obligation', 'obligations'
+        'threshold', 'globally', 'required', 'obligation', 'obligations', 'constitutes', 'constitute', 'defining', 'defines', 'defined', 'definition', 'scope'
     }
 
     SYNONYM_GROUPS: List[Set[str]] = [
@@ -231,7 +231,7 @@ class GuardrailsEngine:
                 stripped_tokens.update({'trips', 'nagoya', 'wipo', 'gratk', 'article', '27', 'treaty', 'protocol', 'agreement'})
 
         # 4. Extract inquiry concept tokens
-        tokens = [w for w in re.findall(r'\b[a-z0-9\(\)]+\b', q_lower) if w not in cls.STOPWORDS and w not in cls.QUERY_META_TERMS and len(w) >= 3]
+        tokens = [w for w in re.findall(r'\b[a-z0-9]+(?:\([a-z0-9]+\))*', q_lower) if w not in cls.STOPWORDS and w not in cls.QUERY_META_TERMS and len(w) >= 3]
         inquiry_terms = [t for t in tokens if t not in stripped_tokens]
         if not inquiry_terms:
             if is_comparative or any(re.search(pat, q_lower) for pat, _ in cls.KNOWN_DOC_PATTERNS):
@@ -255,6 +255,11 @@ class GuardrailsEngine:
             # Suffix/stem match (e.g. ratifications -> ratification, accessions -> accession)
             stem = term[:-1] if term.endswith('s') and len(term) > 3 else term
             if stem in evidence_text:
+                matched_terms.append(term)
+                continue
+            # Section / subsection matching (e.g. 2(1)(j) in Section 2 with clause (j))
+            m_sec = re.findall(r'[a-z0-9]+', term)
+            if len(m_sec) >= 2 and all(part in evidence_text for part in m_sec):
                 matched_terms.append(term)
                 continue
             # Synonym match
@@ -321,19 +326,21 @@ class GuardrailsEngine:
         if target_sections:
             sec_found = False
             for sec in target_sections:
-                m_sub = re.match(r'^([0-9]+)\s*[\(]([a-z0-9]+)[\)]$', sec) or re.match(r'^([0-9]+)([a-zA-Z])$', sec)
                 for c in candidates:
                     sec_clause = c.get("section_or_clause", "").lower()
                     text_lower = c.get("text", "").lower()
                     if sec in sec_clause or f"section {sec}" in text_lower or f"rule {sec}" in text_lower or f"article {sec}" in text_lower:
                         sec_found = True
                         break
-                    if m_sub:
-                        s_num, s_clause = m_sub.groups()
-                        clause_pat = f"({s_clause})"
-                        has_clause = clause_pat in text_lower or f"clause ({s_clause})" in text_lower or s_clause in sec_clause
+                    # Multi-part or subsection matching (e.g. 2(1)(j) or 3(p))
+                    parts = re.findall(r'[a-z0-9]+', sec)
+                    if len(parts) >= 2:
+                        s_num = parts[0]
+                        s_sub = parts[-1]
                         has_sec = s_num in sec_clause or f"section {s_num}" in text_lower or f"{s_num}." in text_lower
-                        if has_clause and has_sec:
+                        clause_pat = f"({s_sub})"
+                        has_clause = clause_pat in text_lower or f"clause ({s_sub})" in text_lower or f"clause {s_sub}" in text_lower or s_sub in sec_clause
+                        if has_sec and has_clause:
                             sec_found = True
                             break
                 if sec_found:
